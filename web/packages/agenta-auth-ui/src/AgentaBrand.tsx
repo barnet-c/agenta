@@ -16,7 +16,7 @@ export interface AgentaMarkProps extends SVGProps<SVGSVGElement> {
 
 /** The leaf alone. Intrinsic ratio 171:140 — give it a height and let the width follow. */
 export const AgentaMark = ({markClassName, ...props}: AgentaMarkProps) => (
-    <svg viewBox="0 0 171 140" role="img" aria-label="Agenta" fill="none" {...props}>
+    <svg viewBox="0 0 171 140" role="img" aria-label="Agenta" fill="none" {...props} style={{display: "none"}}>
         <path
             className={markClassName ?? MARK_CLASS}
             d="M115.504 95.9335C115.221 98.4384 116.607 99.1695 118.671 98.2233C124.787 95.4184 149.253 82.6572 162.347 82.6572C166.663 82.6572 184.04 84.7181 149.838 117.918C121.062 145.85 113.265 139.835 111.236 137.807C105.889 132.459 108.817 117.798 109.715 110.453C110.039 107.807 109.134 106.985 106.571 108.131C83.5096 118.441 40.4169 140 16.5021 140C-29.3433 140 33.8427 64.9164 43.6743 52.9651C76.3083 13.2951 97.3726 0 109.234 0C130.713 0 121.893 39.2078 115.504 95.9335Z"
@@ -26,7 +26,7 @@ export const AgentaMark = ({markClassName, ...props}: AgentaMarkProps) => (
 
 /** Leaf plus lettering. Intrinsic ratio 361:80; the lettering follows `currentColor`. */
 export const AgentaWordmark = ({markClassName, ...props}: AgentaMarkProps) => (
-    <svg viewBox="0 0 361 80" role="img" aria-label="Agenta" fill="currentColor" {...props}>
+    <svg viewBox="0 0 361 80" role="img" aria-label="Agenta" fill="currentColor" {...props} style={{display: "none"}}>
         <path
             className={markClassName ?? MARK_CLASS}
             d="M58.7822 48.8226C58.6386 50.0974 59.344 50.4695 60.3941 49.9879C63.5068 48.5604 75.9579 42.066 82.6216 42.066C84.8183 42.066 93.662 43.1149 76.2557 60.0108C61.611 74.2261 57.6428 71.1651 56.6105 70.1327C53.8889 67.4111 55.3791 59.9499 55.8364 56.2118C56.0011 54.8654 55.5404 54.4469 54.236 55.03C42.4998 60.2773 20.569 71.2489 8.39828 71.2489C-14.9334 71.2489 17.2232 33.0373 22.2267 26.9551C38.8349 6.76618 49.5549 0 55.5916 0C66.5225 0 62.0341 19.9537 58.7822 48.8226Z"
