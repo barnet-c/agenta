@@ -69,6 +69,8 @@ function commandSandboxArtifact(config: RunnerConfig): { image: string } | { sna
 
 export interface InProcessProvider {
   deps: SandboxAgentDeps;
+  /** Shutdown: delete the command sandboxes no environment holds any more. */
+  deleteUnheld(): void;
   /** Shutdown: wait (bounded) for command sandboxes still parking or being deleted. */
   settle(timeoutMs: number): Promise<void>;
 }
@@ -105,7 +107,11 @@ export function createInProcessProvider(config: RunnerConfig, log: Log): InProce
     log,
     { mounter: geesefsMounter(log) },
   );
-  const ledger = new SessionLedger({ maxSessions: config.inprocess.maxSessions, heapPressureRatio: HEAP_PRESSURE_RATIO });
+  const ledger = new SessionLedger({
+    maxSessions: config.inprocess.maxSessions,
+    heapPressureRatio: HEAP_PRESSURE_RATIO,
+    onHeapPressure: () => void registry.evictParkedConversations(),
+  });
   const runtime = { registry, config: INPROCESS_LIMITS, ledger, log };
   // One line a minute while anything is held: sandboxes, retirements, slots kept
   // for sandboxes not yet confirmed stopped or gone, sessions, memory.
@@ -123,6 +129,7 @@ export function createInProcessProvider(config: RunnerConfig, log: Log): InProce
         start: async ({ facts, persist }) => new InProcessHarnessHost(runtime, facts, persist),
       },
     },
+    deleteUnheld: () => registry.deleteUnheld(),
     settle: (timeoutMs) => registry.settle(timeoutMs),
   };
 }

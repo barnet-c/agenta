@@ -2,13 +2,13 @@ from contextlib import asynccontextmanager
 import asyncio
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 from uuid import UUID
 
 import agenta as ag
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-
 from supertokens_python import get_all_cors_headers as get_all_supertokens_cors_headers
 from supertokens_python.framework.fastapi import (
     get_middleware as get_supertokens_middleware,
@@ -16,6 +16,7 @@ from supertokens_python.framework.fastapi import (
 
 from oss.src.utils.common import is_ee
 from oss.src.utils.logging import get_module_logger
+from oss.src.utils.server_tracing import instrument_fastapi, setup_server_tracing
 from oss.src.utils.helpers import (
     validate_platform_runtime_key,
     validate_required_env_vars,
@@ -43,6 +44,7 @@ from oss.databases.postgres.migrations.tracing.utils import (
 from oss.src.middlewares.auth import auth_middleware
 from oss.src.middlewares.analytics import analytics_middleware
 from oss.src.middlewares.prefix import ApiPrefixStripMiddleware
+from oss.src.middlewares.supertokens_errors import SuperTokensHTTPExceptionMiddleware
 
 from oss.src.core.auth.supertokens.config import init_supertokens
 
@@ -83,6 +85,7 @@ from oss.src.dbs.postgres.folders.dao import FoldersDAO
 
 # Services
 from oss.src.core.secrets.services import VaultService
+from oss.src.core.secrets.claude_token import ClaudeTokenClient
 from oss.src.core.secrets.subscription_login import SubscriptionLoginRunnerClient
 from oss.src.core.secrets.subscription_service import SubscriptionLoginService
 from oss.src.core.webhooks.service import WebhooksService
@@ -299,6 +302,7 @@ from oss.src.routers import (
 from oss.src.apis.fastapi.access.router import AccessRouter
 
 from oss.src.utils.env import env
+from oss.src.core.rollout.switches import prefetch_rollout_flags
 from oss.src.core.evaluations.runtime.broker import (
     build_evaluations_broker,
     build_evaluations_worker,
@@ -306,36 +310,48 @@ from oss.src.core.evaluations.runtime.broker import (
 import oss.src.core.evaluations.tasks.run  # noqa: F401
 import oss.src.core.evaluations.tasks.processor  # noqa: F401
 
-print("[STARTUP] About to import agenta SDK")
+
+def _startup(message: str) -> None:
+    # one structured line in the json format; the plain print is unchanged
+    if env.agenta.logging.format == "json":
+        get_module_logger(__name__).info(message)
+    else:
+        print(message)
+
+
+_startup("[STARTUP] About to import agenta SDK")
 _t_ag_import = time.perf_counter()
 # ag already imported at top
-print(f"[STARTUP] agenta SDK imported (+{time.perf_counter() - _t_ag_import:.3f}s)")
+_startup(f"[STARTUP] agenta SDK imported (+{time.perf_counter() - _t_ag_import:.3f}s)")
 
 _startup_t0 = time.perf_counter()
-print("[STARTUP] imports completed, beginning initialization")
+_startup("[STARTUP] imports completed, beginning initialization")
 
-print("[STARTUP] ag.init() starting")
+_startup("[STARTUP] ag.init() starting")
 _t_ag_init = time.perf_counter()
 ag.init(
     api_url=env.agenta.api_url,
 )
-print(f"[STARTUP] ag.init() completed (+{time.perf_counter() - _t_ag_init:.3f}s)")
+_startup(f"[STARTUP] ag.init() completed (+{time.perf_counter() - _t_ag_init:.3f}s)")
+
+# Before the engines, brokers and HTTP sessions below exist, so they get traced too.
+setup_server_tracing("agenta-api")
 
 ee = None
 _t_before_ee = time.perf_counter()
 if is_ee():
-    print("[STARTUP] EE module import starting (Stripe init happens here)")
+    _startup("[STARTUP] EE module import starting (Stripe init happens here)")
     import ee.src.main as ee  # type: ignore
 
     _ee_elapsed = time.perf_counter() - _t_before_ee
-    print(f"[STARTUP] EE module import completed (+{_ee_elapsed:.3f}s)")
+    _startup(f"[STARTUP] EE module import completed (+{_ee_elapsed:.3f}s)")
 
 
 log = get_module_logger(__name__)
 
 init_supertokens()
 _st_elapsed = time.perf_counter() - _startup_t0
-print(f"[STARTUP] init_supertokens completed (+{_st_elapsed:.3f}s)")
+_startup(f"[STARTUP] init_supertokens completed (+{_st_elapsed:.3f}s)")
 
 
 @asynccontextmanager
@@ -357,6 +373,8 @@ async def lifespan(*args, **kwargs):
 
     await _triggers_broker.startup()
     await _channels_inbox_broker.startup()
+
+    prefetch_rollout_flags()
 
     # The store bucket is not lazily created; signed mounts need it to exist. Best-effort
     # so a store outage doesn't block API startup (mounts degrade, the rest runs).
@@ -619,17 +637,45 @@ app.middleware("http")(analytics_middleware)
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 app.add_middleware(get_supertokens_middleware())
+# Added right after SuperTokens => wraps it, inside CORS, so rejections keep CORS headers.
+app.add_middleware(SuperTokensHTTPExceptionMiddleware)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
+
+def _cors_origins(web_url: str) -> list[str]:
+    origins = [
         "http://localhost:3000",
         "http://localhost:3001",
         "http://0.0.0.0:3000",
         "http://0.0.0.0:3001",
         "https://docs.agenta.ai",
         "https://agenta.ai",
-    ],
+    ]
+
+    parsed_web_url = urlsplit(web_url)
+    scheme = parsed_web_url.scheme.lower()
+    host = parsed_web_url.hostname
+    if scheme in ("http", "https") and host:
+        if ":" in host:
+            host = f"[{host}]"
+        try:
+            port = parsed_web_url.port
+        except ValueError:
+            port = None
+        default_port = 443 if scheme == "https" else 80
+        web_origin = f"{scheme}://{host}"
+        if port and port != default_port:
+            web_origin = f"{web_origin}:{port}"
+        if web_origin not in origins:
+            origins.append(web_origin)
+
+    return origins
+
+
+cors_origins = _cors_origins(env.agenta.web_url)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
     allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
@@ -641,6 +687,9 @@ app.add_middleware(
         "Content-Type",
         "Idempotency-Key",
         "X-Agenta-App-Scope",
+        # The embed widget's credential. Only the web origin passes CORS, so a
+        # request from another site carrying it still fails the preflight.
+        "X-Agenta-Visitor-Key",
         "If-Match",
         "If-None-Match",
     ]
@@ -659,10 +708,12 @@ app.add_middleware(ApiPrefixStripMiddleware, routes=lambda: _ROUTED_APP.routes)
 if ee and is_ee():
     app = ee.extend_main(app)
 
+instrument_fastapi(app)
+
 # DAOS -------------------------------------------------------------------------
 
 _t_daos = time.perf_counter()
-print("[STARTUP] DAO initialization starting")
+_startup("[STARTUP] DAO initialization starting")
 
 # Instantiate engines at startup (lazy — they don't connect until first use)
 _transactions_engine = get_transactions_engine()
@@ -730,7 +781,7 @@ llm_endpoints_dao = LLMEndpointsDAO(engine=_transactions_engine)
 # SERVICES ---------------------------------------------------------------------
 
 _t_daos_done = time.perf_counter() - _t_daos
-print(f"[STARTUP] DAO initialization completed (+{_t_daos_done:.3f}s)")
+_startup(f"[STARTUP] DAO initialization completed (+{_t_daos_done:.3f}s)")
 _t_services = time.perf_counter()
 
 vault_service = VaultService(
@@ -743,6 +794,7 @@ vault_service = VaultService(
 subscription_login_service = SubscriptionLoginService(
     vault_service=vault_service,
     runner_client=SubscriptionLoginRunnerClient(),
+    claude_token_client=ClaudeTokenClient(),
 )
 
 provider_probe_service = ProviderProbeService()
@@ -1072,7 +1124,7 @@ session_attachments_service = SessionAttachmentsService(
 )
 
 _t_services_done = time.perf_counter() - _t_services
-print(f"[STARTUP] Service initialization completed (+{_t_services_done:.3f}s)")
+_startup(f"[STARTUP] Service initialization completed (+{_t_services_done:.3f}s)")
 _t_routers = time.perf_counter()
 
 # ROUTERS ----------------------------------------------------------------------
@@ -1289,6 +1341,8 @@ channels_ingress = ChannelsIngressRouter(
     adapter_registry=channels_adapter_registry,
     dispatch_task=_channels_inbox_worker.dispatch_inbox_event,
     telegram_binding_service=_telegram_binding_service,
+    records_service=records_service,
+    attachments_service=session_attachments_service,
 )
 
 channels = ChannelsRouter(
@@ -1313,12 +1367,73 @@ secrets_resolver = SecretsResolver(
     vault_service=vault_service,
 )
 
-gateway_policy_service = GatewayPolicyService(resolver=secrets_resolver)
+# The wallet's side of the gateway seam, bound only in EE with the wallet on. Otherwise the
+# policy service keeps its null ports: every call admitted, no usage handed off.
+gateway_spend_admission = None
+gateway_usage_sink = None
+if ee and is_ee() and env.wallets.enabled:
+    from ee.src.core.access.entitlements.service import plan_for
+    from ee.src.core.measurements.sink import MeasurementUsageSink
+    from ee.src.core.wallets.admission import WalletSpendAdmission
+    from ee.src.dbs.redis.wallets.streams import RedisMeasurementPublisher
+    from ee.src.dbs.redis.wallets.turns import RedisSessionTurnHolds
+
+    gateway_spend_admission = WalletSpendAdmission(
+        wallet=ee.wallets_service,
+        session_holds=RedisSessionTurnHolds(redis_client=_lock_engine),
+        plan_for=plan_for,
+    )
+    gateway_usage_sink = MeasurementUsageSink(
+        publisher=RedisMeasurementPublisher(redis_client=_streams_engine.get_redis())
+    )
+
+# Managed tool actions spend Agenta's own provider accounts, so they exist only where the
+# wallet does. The only providers today are the mocks.
+managed_mcp_adapter = None
+if ee and is_ee() and env.wallets.enabled and env.mock_gateways.enabled:
+    from oss.src.core.gateways.mcps.providers.managed.adapter import ManagedMCPAdapter
+    from oss.src.core.managed_tools.limits import RedisManagedActionRateLimiter
+    from oss.src.core.managed_tools.mock.actions import MOCK_ACTIONS
+    from oss.src.core.managed_tools.mock.providers import build_mock_providers
+    from oss.src.core.managed_tools.registry import ManagedActionRegistry
+    from oss.src.core.managed_tools.service import ManagedToolsService
+    from ee.src.core.measurements.tools import WalletManagedActionBilling
+    from ee.src.dbs.redis.wallets.streams import RedisMeasurementPublisher
+
+    managed_mcp_adapter = ManagedMCPAdapter(
+        managed_tools=ManagedToolsService(
+            registry=ManagedActionRegistry(
+                actions=MOCK_ACTIONS, providers=build_mock_providers()
+            ),
+            billing=WalletManagedActionBilling(
+                wallet=ee.wallets_service,
+                publisher=RedisMeasurementPublisher(
+                    redis_client=_streams_engine.get_redis()
+                ),
+            ),
+            rate_limiter=RedisManagedActionRateLimiter(),
+        )
+    )
+
+gateway_policy_service = GatewayPolicyService(
+    resolver=secrets_resolver,
+    spend_admission=gateway_spend_admission,
+    usage_sink=gateway_usage_sink,
+)
+
+# EE: the starter-credits connection seeded before the bridge registered gateway
+# endpoints gets its endpoint on its first gateway call.
+llm_missing_endpoint_repair = None
+if ee and is_ee():
+    from ee.src.core.starter_credits_bridge.service import (
+        repair_starter_credits_endpoint as llm_missing_endpoint_repair,
+    )
 
 llm_gateway_service = LLMGatewayService(
     llm_endpoints_dao=llm_endpoints_dao,
     policy=gateway_policy_service,
     resolver=secrets_resolver,
+    missing_endpoint_repair=llm_missing_endpoint_repair,
     upstream_registry=LLMUpstreamRegistry(
         adapters={
             "relay": RelayLLMAdapter(),
@@ -1338,6 +1453,7 @@ mcp_oauth_connect_service = MCPOAuthConnectService(
     client=MCPOAuthClient(),
     api_url=env.agenta.api_url,
     attempts_dao=mcp_oauth_attempts_dao,
+    endpoints_dao=mcp_endpoints_dao,
 )
 
 mcp_gateway_service = MCPGatewayService(
@@ -1378,6 +1494,7 @@ mcp_gateway_service = MCPGatewayService(
     # The stored grant is renewed on the data-plane path, and the connect service is what
     # holds the vault and the OAuth client that can spend a refresh token (OR55).
     oauth_refresher=mcp_oauth_connect_service,
+    managed_tools=managed_mcp_adapter,
 )
 
 gateway_credentials_router = GatewayCredentialsRouter()
@@ -2179,13 +2296,13 @@ app.include_router(
 
 # ------------------------------------------------------------------------------
 _t_routers_done = time.perf_counter() - _t_routers
-print(f"[STARTUP] Router initialization completed (+{_t_routers_done:.3f}s)")
+_startup(f"[STARTUP] Router initialization completed (+{_t_routers_done:.3f}s)")
 
 _t_mount_routers_done = time.perf_counter() - _t_mount_routers
-print(f"[STARTUP] Router mounting completed (+{_t_mount_routers_done:.3f}s)")
+_startup(f"[STARTUP] Router mounting completed (+{_t_mount_routers_done:.3f}s)")
 
 if ee and is_ee():
     app = ee.extend_app_schema(app)
 
 _total_startup = time.perf_counter() - _startup_t0
-print(f"[STARTUP] module initialization completed in {_total_startup:.3f}s")
+_startup(f"[STARTUP] module initialization completed in {_total_startup:.3f}s")

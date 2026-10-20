@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import {
   createRunLimits,
   resolveRunLimits,
+  runWithTurnLimit,
   DEFAULT_IDLE_TIMEOUT_MS,
   DEFAULT_TOTAL_DEADLINE_MS,
   DEFAULT_TTFB_TIMEOUT_MS,
@@ -20,6 +21,8 @@ import {
   IDLE_TIMEOUT_ENV,
   TTFB_TIMEOUT_ENV,
   TOOL_CALL_TIMEOUT_ENV,
+  TOOL_CALL_GRACE_MS,
+  commandTimeoutSeconds,
   type Clock,
   type RunLimitKind,
 } from "../../src/engines/sandbox_agent/run-limits.ts";
@@ -79,6 +82,14 @@ function withEnv(overrides: Record<string, string | undefined>, fn: () => void):
   }
 }
 
+describe("the first-response limit", () => {
+  it("outlasts the slowest first answer the LLM gateway waits for", () => {
+    // `builtin/agenta` waits 300 s for a model, and the gateway may add two Retry-After waits
+    // of up to 60 s each before that answer.
+    assert.ok(DEFAULT_TTFB_TIMEOUT_MS > 300_000 + 2 * 60_000);
+  });
+});
+
 describe("resolveRunLimits", () => {
   it("defaults every limit wide with idle strictly under total", () => {
     withEnv(
@@ -135,6 +146,58 @@ describe("resolveRunLimits", () => {
     );
   });
 
+  it("the plan's turn limit shortens the total deadline and carries its message", () => {
+    withEnv({ [TOTAL_DEADLINE_ENV]: undefined, [IDLE_TIMEOUT_ENV]: undefined }, () => {
+      const limits = resolveRunLimits(() => {}, { ms: 30 * 60_000, message: "Stopped at 30 minutes." });
+      assert.equal(limits.totalMs, 30 * 60_000);
+      assert.equal(limits.turnLimitMessage, "Stopped at 30 minutes.");
+      // Idle equal to a plan's short turn is not a misconfiguration: the total fires first.
+      assert.equal(limits.idleMs, DEFAULT_IDLE_TIMEOUT_MS);
+    });
+  });
+
+  it("an operator's lower env deadline wins over the plan, and no plan means the env alone", () => {
+    withEnv({ [TOTAL_DEADLINE_ENV]: "60000", [IDLE_TIMEOUT_ENV]: "10000" }, () => {
+      const limits = resolveRunLimits(() => {}, { ms: 4 * 60 * 60_000, message: "Stopped at 4 hours." });
+      assert.equal(limits.totalMs, 60000);
+      assert.equal(limits.turnLimitMessage, undefined);
+    });
+    withEnv({ [TOTAL_DEADLINE_ENV]: undefined }, () => {
+      const limits = resolveRunLimits(() => {}, undefined);
+      assert.equal(limits.totalMs, DEFAULT_TOTAL_DEADLINE_MS);
+      assert.equal(limits.turnLimitMessage, undefined);
+    });
+  });
+
+  it("reads the turn limit in scope for the run that resolves it", () => {
+    withEnv({ [TOTAL_DEADLINE_ENV]: undefined }, () => {
+      const inside = runWithTurnLimit({ ms: 1_800_000, message: "Stopped." }, () => resolveRunLimits());
+      assert.ok(inside.totalMs <= 1_800_000 && inside.totalMs > 1_790_000);
+      assert.equal(resolveRunLimits().totalMs, DEFAULT_TOTAL_DEADLINE_MS);
+    });
+  });
+
+  it("a later attempt in the same admitted turn gets only the time left", () => {
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      withEnv({ [TOTAL_DEADLINE_ENV]: undefined }, () => {
+        const totals = runWithTurnLimit({ ms: 1_800_000, message: "Stopped." }, () => {
+          const first = resolveRunLimits().totalMs;
+          now += 120_000; // the first attempt stalled for two minutes and is retried
+          const retry = resolveRunLimits().totalMs;
+          now += 1_800_000; // a retry that starts past the limit trips at once
+          const late = resolveRunLimits();
+          return [first, retry, late.totalMs, late.turnLimitMessage];
+        });
+        assert.deepEqual(totals, [1_800_000, 1_680_000, 1, "Stopped."]);
+      });
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
   it("a degenerate total cannot derive an idle timeout that fires instantly", () => {
     // A total at the timer floor makes "half the total" round to 0; every field must still
     // leave here armable, since createRunLimits feeds all four straight to setTimeout.
@@ -173,13 +236,18 @@ describe("createRunLimits", () => {
       { clock },
     );
     const trips: string[] = [];
-    limits.onTrip((reason) => trips.push(reason));
+    const kinds: string[] = [];
+    limits.onTrip((reason, kind) => {
+      trips.push(reason);
+      kinds.push(kind);
+    });
 
     advance(999);
     assert.equal(trips.length, 0, "must not trip before the deadline");
     advance(2);
     assert.equal(trips.length, 1);
     assert.match(trips[0], /total run deadline/);
+    assert.deepEqual(kinds, ["total"]);
 
     // Idempotent: nothing else should fire after the first trip (timers were cleared).
     advance(100000);
@@ -377,6 +445,76 @@ describe("createRunLimits", () => {
     limits.noteProgress();
     advance(5000);
 
+    assert.deepEqual(kinds, ["idle"]);
+  });
+});
+
+describe("a slow tool call is stopped by its command, not by the turn (EU 2026-10-06)", () => {
+  // A `bash` call ran past the 300 s tool-call limit and the watchdog ended the whole turn. The
+  // command is now stopped at the limit, so the watchdog waits a grace for that result first.
+  it("gives a command the tool-call limit as its timeout, never more, whatever the model asked", () => {
+    assert.equal(commandTimeoutSeconds(undefined, 300_000), 300);
+    assert.equal(commandTimeoutSeconds(600, 300_000), 300);
+    assert.equal(commandTimeoutSeconds(20, 300_000), 20);
+    assert.equal(commandTimeoutSeconds(0, 300_000), 300);
+    assert.equal(commandTimeoutSeconds(undefined, 500), 1);
+  });
+
+  it("reads the command timeout from AGENTA_RUNNER_TOOL_CALL_TIMEOUT_MS", () => {
+    withEnv({ [TOOL_CALL_TIMEOUT_ENV]: "20000" }, () => {
+      assert.equal(commandTimeoutSeconds(undefined), 20);
+      assert.equal(resolveRunLimits().toolCallGraceMs, TOOL_CALL_GRACE_MS);
+    });
+  });
+
+  it("lets a tool call whose result arrives within the grace end normally", () => {
+    const { clock, advance } = fakeClock();
+    const limits = createRunLimits(
+      { totalMs: 1e7, idleMs: 1e7, ttfbMs: 1e7, toolCallMs: 1000, toolCallGraceMs: 500 },
+      { clock },
+    );
+    const trips: string[] = [];
+    limits.onTrip((reason) => trips.push(reason));
+    limits.noteToolCallStart("call-1");
+    advance(1200); // past the limit: the command was stopped and its result is on its way
+    assert.equal(trips.length, 0);
+    limits.noteToolCallEnd("call-1");
+    advance(10_000);
+    assert.equal(trips.length, 0);
+  });
+
+  it("still ends the turn over a hung tool call once the grace is spent", () => {
+    const { clock, advance } = fakeClock();
+    const limits = createRunLimits(
+      { totalMs: 1e7, idleMs: 1e7, ttfbMs: 1e7, toolCallMs: 1000, toolCallGraceMs: 500 },
+      { clock },
+    );
+    const trips: Array<[string, RunLimitKind]> = [];
+    limits.onTrip((reason, kind) => trips.push([reason, kind]));
+    limits.noteToolCallStart("call-hung");
+    advance(1499);
+    assert.equal(trips.length, 0);
+    advance(1);
+    assert.equal(trips.length, 1);
+    assert.equal(trips[0]![1], "tool-call");
+    assert.match(trips[0]![0], /tool call call-hung exceeded 1000ms and returned no result within 500ms more/);
+  });
+
+  it("does not let the idle limit cut a silent command before its own timer (both default to 30 min)", () => {
+    const { clock, advance } = fakeClock();
+    const limits = createRunLimits(
+      { totalMs: 1e7, idleMs: 1000, ttfbMs: 1e7, toolCallMs: 1000, toolCallGraceMs: 500 },
+      { clock },
+    );
+    const kinds: RunLimitKind[] = [];
+    limits.onTrip((_reason, kind) => kinds.push(kind));
+    limits.noteToolCallStart("call-silent");
+    advance(1200); // idle has elapsed, but the call is in flight and inside its grace
+    assert.deepEqual(kinds, []);
+    limits.noteToolCallEnd("call-silent");
+    advance(999);
+    assert.deepEqual(kinds, []);
+    advance(1); // nothing in flight any more: idle applies again
     assert.deepEqual(kinds, ["idle"]);
   });
 });

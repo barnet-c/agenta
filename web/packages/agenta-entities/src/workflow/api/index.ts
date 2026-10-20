@@ -58,6 +58,7 @@ export {
     fetchAgTypeSchema,
     // Harness capabilities catalog
     fetchHarnessCapabilities,
+    fetchBuiltinModelEndpoints,
     // Catalog
     fetchWorkflowCatalogTemplates,
     type WorkflowCatalogTemplate,
@@ -69,10 +70,12 @@ export {
 export {
     loadAgentTemplate,
     queryAgentTemplates,
+    scanAgentTemplateSource,
     validateAgentTemplate,
     type AgentTemplateEntry,
     type AgentTemplateLoadRequest,
     type AgentTemplateLoadResult,
+    type AgentTemplateRepositoryScan,
     type AgentTemplateSource,
     type AgentTemplateSourcePin,
     type AgentTemplatesQuery,

@@ -1,6 +1,6 @@
 [project]
 name = "agenta"
-version = "0.121.7"
+version = "0.122.9"
 description = "Agenta is the open-source workspace for your agents. Build agents through chat, improve them with feedback, and share them with your team."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -38,6 +38,16 @@ dependencies = [
     "RestrictedPython>=8,<9",
 ]
 
+[project.optional-dependencies]
+# What agenta.sdk.engines.tracing.server instruments (the Agenta api and services).
+server-tracing = [
+    "opentelemetry-instrumentation-fastapi>=0.64b0,<0.65",
+    "opentelemetry-instrumentation-httpx>=0.64b0,<0.65",
+    "opentelemetry-instrumentation-aiohttp-client>=0.64b0,<0.65",
+    "opentelemetry-instrumentation-redis>=0.64b0,<0.65",
+    "opentelemetry-instrumentation-sqlalchemy>=0.64b0,<0.65",
+]
+
 [project.urls]
 Homepage = "https://agenta.ai"
 Repository = "https://github.com/agenta-ai/agenta"
@@ -47,7 +57,7 @@ Documentation = "https://agenta.ai/docs/"
 dev = [
     "posthog>=7,<8",
     "questionary>=2,<3",
-    "setuptools>=80,<81",
+    "setuptools>=83,<84",
     "uvicorn>=0.38,<0.39",
     "requests>=2,<3",
     "pexpect>=4,<5",

@@ -4,6 +4,7 @@ import {
     getSettingsSidebarTabs,
     getSettingsTabDescription,
     getSettingsTabLabel,
+    isSettingsTabVisible,
     resolveSettingsTab,
     SETTINGS_SCOPES,
     SETTINGS_TABS,
@@ -103,10 +104,12 @@ describe("settings tab descriptions", () => {
     })
 
     it("varies the billing description with the billing entitlement", () => {
-        expect(getSettingsTabDescription("billing", baseAccess)).toContain("subscription")
-        expect(
-            getSettingsTabDescription("billing", {...baseAccess, billingEnabled: false}),
-        ).not.toContain("subscription")
+        expect(getSettingsTabDescription("billing", baseAccess)).toBe(
+            "Your plan, its limits, and payment details.",
+        )
+        expect(getSettingsTabDescription("billing", {...baseAccess, billingEnabled: false})).toBe(
+            "Track how much of your plan you have used.",
+        )
     })
 })
 
@@ -119,23 +122,37 @@ describe("settings sidebar scopes", () => {
             tabs.filter((tab) => tab.scope === scope).map(({key}) => key)
 
         expect(keysForScope("project")).toEqual([
-            "apiKeys",
-            "secrets",
             "llms",
             "tools",
-            "channels",
-            "webhooks",
+            "secrets",
             "mcpEndpoints",
+            "channels",
+            "apiKeys",
+            "webhooks",
+            "analytics",
         ])
         expect(keysForScope("organization")).toEqual([
-            "organizationGeneral",
+            "credits",
+            "billing",
             "workspace",
+            "organizationGeneral",
             "projects",
             "organization",
             "auditLog",
-            "billing",
         ])
         expect(keysForScope("personal")).toEqual(["account", "preferences"])
+    })
+
+    it("shows the credits view only where the organization's wallet is enforced", () => {
+        expect(isSettingsTabVisible("credits", {...baseAccess, walletsEnabled: true})).toBe(false)
+        expect(
+            isSettingsTabVisible("credits", {
+                ...baseAccess,
+                walletsEnabled: true,
+                walletEnforced: true,
+            }),
+        ).toBe(true)
+        expect(getSettingsTabLabel("credits", baseAccess)).toBe("Credits")
     })
 
     it("exposes separate LLM and MCP pages", () => {

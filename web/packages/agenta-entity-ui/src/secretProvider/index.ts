@@ -42,6 +42,14 @@ export {
     default as SubscriptionConnectionCard,
     type SubscriptionConnectionCardProps,
 } from "./SubscriptionConnectionCard"
+export {
+    default as SubscriptionSignInDialog,
+    type SubscriptionSignInDialogProps,
+} from "./SubscriptionSignInDialog"
+export {
+    default as SubscriptionTokenCard,
+    type SubscriptionTokenCardProps,
+} from "./SubscriptionTokenCard"
 export {default as ScrollScrim, type ScrollScrimProps} from "./ScrollScrim"
 
 /**
@@ -54,3 +62,11 @@ export {
     type ConfigureProviderDrawerProps,
 } from "./ConfigureProviderDrawer"
 export {useLLMProviderConfig, type LLMProviderConfig} from "./useLLMProviderConfig"
+
+/** Saving one API key without the drawer, for inline add-key forms. */
+export {
+    KEY_PROVIDERS,
+    keyPlaceholderFor,
+    newProviderKeyDraft,
+    useSaveProviderKey,
+} from "./useSaveProviderKey"

@@ -36,6 +36,7 @@ import {
     agentShouldResumeAfterApproval,
     buildAgentRequest,
     buildRenderMap,
+    isHitlPending,
     isResumeSend,
     type LiveAgentInteraction,
 } from "@agenta/playground/agent-chat"
@@ -64,7 +65,7 @@ import {
 import {mergePendingSendEchoRows} from "../assets/pendingSendEchoes"
 import {sideEffectingToolsInRange} from "../assets/rewind"
 import {submitServerOwnedApproval} from "../assets/serverOwnedApproval"
-import {startupLabelFromDataPart} from "../assets/startupPhases"
+import {startupPhaseFromDataPart} from "../assets/startupPhases"
 import {getMessageTraceId} from "../assets/trace"
 import {reconcileInteractionRowStates} from "../assets/transcriptToMessages"
 import {isClientToolPart as defaultIsClientToolPart} from "../clientTools"
@@ -107,6 +108,7 @@ import {
     sessionMessagesAtom,
     sessionRecordCountsReadAtom,
     setSessionStatusAtom,
+    holdSessionStatusAtom,
 } from "../state/sessionMessages"
 import {clearTurnClockAtom, startTurnClockAtom} from "../state/turnClock"
 
@@ -238,7 +240,9 @@ export interface AgentConversation {
      * connect). Typed messages queue rather than send while this holds. */
     hitlPending: boolean
     removeQueued: (id: string) => void
-    sendQueuedNow?: (id: string) => Promise<void>
+    sendQueuedNow?: (id: string) => void
+    /** A stop is carrying a queued input into the next turn; a second Send Now must wait. */
+    sendNowPending: boolean
     /** Id of the held message the composer is editing, or null. */
     editingId: string | null
     /** Borrow the composer for `id`, stashing the draft it currently holds. */
@@ -248,6 +252,8 @@ export interface AgentConversation {
     /** Rewrite the edited message with the composer's content (or queue it anew if it drained).
      *  Returns the draft the session displaced, for the host to put back. */
     commitEdit: (item: {text: string; fileParts?: FileUIPart[]}) => string | Promise<string>
+    /** Keep a refused send as a flagged row when the composer already holds a newer draft. */
+    keepRefusedSend: (item: {text: string; fileParts?: FileUIPart[]}) => void
     /** Headless approval-dock state wired to the live-gate-aware response path. */
     approvals: ApprovalDock
     /** Settle a parked client tool part (widgets call this; the resume predicate auto-resends). */
@@ -298,13 +304,14 @@ export const useAgentConversation = ({
     const store = useStore()
     const persistMessages = useSetAtom(persistSessionMessagesAtom)
     const setSessionStatus = useSetAtom(setSessionStatusAtom)
+    const holdSessionStatus = useSetAtom(holdSessionStatusAtom)
     const revalidateSessionMounts = useSetAtom(revalidateSessionMountsAtom)
     const revalidateSessionRecords = useSetAtom(revalidateSessionRecordsAtom)
     const revalidateSessionInteractions = useSetAtom(revalidateSessionInteractionsAtom)
     const fetchSessionInteractionStates = useSetAtom(fetchSessionInteractionStatesAtom)
     const pruneExpanded = useSetAtom(pruneExpandedAtom)
     const stampMessagesCreatedAt = useSetAtom(stampMessagesCreatedAtAtom)
-    const setTurnStartupLabel = useSetAtom(startTurnClockAtom)
+    const setTurnStage = useSetAtom(startTurnClockAtom)
     const clearTurnClock = useSetAtom(clearTurnClockAtom)
 
     // Seed once from the persisted store (read imperatively so our own writes don't feed back).
@@ -395,8 +402,10 @@ export const useAgentConversation = ({
         },
         [sessionId],
     )
-    // Tracks `busy` for callbacks that outlive a render (the preserve verdict at unmount).
+    // Tracks `busy` for callbacks that outlive a render.
     const busyRef = useRef(false)
+    // Only an open stream outlives the mount; an accepted run whose stream closed has nothing live.
+    const streamOpenRef = useRef(false)
     // Only a stream THIS client renders. A shared-delivered turn renders from the live frames,
     // so the durable snapshot behind them stays adoptable — see the adoption guard below.
     const localRenderBusyRef = useRef(false)
@@ -459,8 +468,8 @@ export const useAgentConversation = ({
                 acceptedRunBySession.set(sessionId, acceptedExecutionIdRef.current)
                 setAcceptedRunPending(true)
             }
-            const label = startupLabelFromDataPart(part)
-            if (label) setTurnStartupLabel(sessionId, label)
+            const phase = startupPhaseFromDataPart(part)
+            if (phase) setTurnStage(sessionId, phase)
         },
         onFinish: ({
             message,
@@ -494,6 +503,9 @@ export const useAgentConversation = ({
             // LIVE mount publishes its own status from `runStatus`, so writing here would flicker.
             if (!mountedRef.current) {
                 setSessionStatus({id: sessionId, status: "idle"})
+                if (isHitlPending(finishedMessages)) {
+                    holdSessionStatus({id: sessionId, status: "awaiting"})
+                }
                 dropSessionChat(sessionId)
             }
         },
@@ -513,7 +525,7 @@ export const useAgentConversation = ({
         sessionId,
         initialMessages,
         hooks,
-        shouldPreserve: () => busyRef.current,
+        shouldPreserve: () => streamOpenRef.current,
     })
 
     const {messages, status, stop, regenerate, setMessages, error, clearError} = useChat({
@@ -562,6 +574,22 @@ export const useAgentConversation = ({
     // forgets it gets a drive that never learns about the cwd mount its own run just created —
     // every file then resolves against the agent mount and 404s (#6535 follow-up).
     useFileActivityDetector({sessionId, messages})
+
+    // A run streamed elsewhere (Home, another device) has no `onFinish` here to re-read mounts.
+    const sharedRunWasLiveRef = useRef(sharedReaderRunning)
+    const streamedHereRef = useRef(busy)
+    useEffect(() => {
+        if (busy) streamedHereRef.current = true
+    }, [busy])
+    useEffect(() => {
+        const wasLive = sharedRunWasLiveRef.current
+        sharedRunWasLiveRef.current = sharedReaderRunning
+        if (!wasLive && sharedReaderRunning) streamedHereRef.current = busy
+        if (!wasLive || sharedReaderRunning) return
+        // This client's own stream already revalidated in `onFinish`.
+        if (!streamedHereRef.current) revalidateSessionMounts(sessionId)
+        streamedHereRef.current = false
+    }, [sharedReaderRunning, busy, sessionId, revalidateSessionMounts])
 
     // Hybrid history: localStorage holds the cached conversation; the durable content lives in
     // the backend record log. Cache-first — when this session opens with no locally-cached
@@ -739,7 +767,8 @@ export const useAgentConversation = ({
         remotelyBusy: sharedReaderRunning && remoteRunIsFresh,
         isSharedReaderReady: () => sharedSenderReadyRef.current,
         // A send admitted here renders from the shared reader, so `onData` never sees these.
-        onStartupPhase: (label) => setTurnStartupLabel(sessionId, label),
+        onTurnStage: (stage) =>
+            stage ? setTurnStage(sessionId, stage) : clearTurnClock(sessionId),
         onExecuted: () => {
             // The run is over: its startup label must not narrate the next turn.
             clearTurnClock(sessionId)
@@ -771,6 +800,7 @@ export const useAgentConversation = ({
         steer,
         removeQueued,
         sendQueuedNow,
+        sendNowPending,
         ownsContinuation,
         serverBusy,
         hitlPending,
@@ -778,6 +808,7 @@ export const useAgentConversation = ({
         beginEdit,
         cancelEdit,
         commitEdit,
+        keepRefusedSend,
         pendingSendRows,
         sendInFlight,
     } = useAgentChatQueue({
@@ -795,6 +826,8 @@ export const useAgentConversation = ({
     // A preserve check that misses `sendInFlight` lets a navigation release and stop the chat in
     // the window between the message leaving and the turn being accepted.
     busyRef.current = busy || acceptedRunPending || sendInFlight
+    // A durable send in flight is not a chat stream, so it does not keep the chat either.
+    streamOpenRef.current = busy
 
     // The server owns continuation after its 202.
     const handleApprovalResponse = useCallback(
@@ -968,14 +1001,19 @@ export const useAgentConversation = ({
     useEffect(() => {
         setSessionStatus({id: sessionId, status: runStatus})
     }, [runStatus, sessionId, setSessionStatus])
+    const runStatusRef = useRef(runStatus)
+    runStatusRef.current = runStatus
     // On unmount, retire the dot ONLY if the run went with us. A chat preserved past this mount is
     // still this browser's run to report, so it keeps its status until it settles — `onFinish`
     // retires it then. The release above already ran, so the registry is authoritative here.
     useEffect(
         () => () => {
             if (!hasSessionChat(sessionId)) setSessionStatus({id: sessionId, status: "idle"})
+            if (runStatusRef.current === "awaiting") {
+                holdSessionStatus({id: sessionId, status: "awaiting"})
+            }
         },
-        [sessionId, setSessionStatus],
+        [sessionId, setSessionStatus, holdSessionStatus],
     )
 
     useEffect(() => {
@@ -1005,13 +1043,12 @@ export const useAgentConversation = ({
         })
     }, [messages, status, sessionId, persistMessages])
 
-    // One startup label per in-flight turn. `submitted` opens a NEW turn, so a label the previous
-    // one left behind must go; `streaming` is the same turn continuing, so its clock is left alone;
-    // every other status is terminal (answered, errored, stopped) and must not strand a label.
+    // One stage per in-flight turn: `submitted` opens a new one, `streaming` names it, the rest end it.
     useEffect(() => {
-        if (status === "streaming") return
-        clearTurnClock(sessionId)
-    }, [status, sessionId, clearTurnClock])
+        if (status === "submitted") setTurnStage(sessionId, "sending")
+        else if (status === "streaming") setTurnStage(sessionId, "started")
+        else clearTurnClock(sessionId)
+    }, [status, sessionId, setTurnStage, clearTurnClock])
 
     // Stamp a first-seen timestamp on any newly-appeared LIVE message (user + assistant) — the
     // fallback the timestamp uses until the turn's trace arrives. Restored rows are excluded: their
@@ -1335,10 +1372,12 @@ export const useAgentConversation = ({
         hitlPending,
         removeQueued,
         sendQueuedNow,
+        sendNowPending,
         editingId,
         beginEdit,
         cancelEdit,
         commitEdit,
+        keepRefusedSend,
         approvals,
         sendToolOutput,
         adoptRevision,

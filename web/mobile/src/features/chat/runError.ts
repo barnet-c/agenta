@@ -46,7 +46,11 @@ const recognise = (
             remedy: "Wait a moment, then try again.",
         }
     }
-    if ((status && status >= 500) || /overloaded|unavailable|timed? ?out/.test(lower)) {
+    if (
+        status === 408 ||
+        (status && status >= 500) ||
+        /overloaded|unavailable|timed? ?out/.test(lower)
+    ) {
         return {
             headline: "The model provider isn't responding.",
             remedy: "Try again in a moment.",
@@ -56,6 +60,13 @@ const recognise = (
 }
 
 const STATUS_PREFIX = /^\s*(\d{3})\s*:\s*/
+
+/** Bounded so a hostile run of text cannot make the scan slow. */
+const CODE_MARKER = /\u27e6agenta_code:[a-z_]{0,64}\u27e7/g
+
+/** The text without the gateway's `⟦agenta_code:…⟧` markers, which are addressed to the runner. */
+export const withoutCodeMarkers = (text: string): string =>
+    text.replace(CODE_MARKER, "").replace(/ {2,}/g, " ").trim()
 
 const firstSentence = (text: string): string => {
     const cut = text.search(/[.!?](\s|$)/)

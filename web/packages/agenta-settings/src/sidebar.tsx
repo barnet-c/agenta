@@ -4,6 +4,8 @@ import type {SidebarConfig, SidebarSection, SidebarSlotContext} from "@agenta/na
 import {
     Broadcast,
     Buildings,
+    ChartLineUp,
+    Coins,
     ClockCounterClockwise,
     FolderSimple,
     Key,
@@ -30,6 +32,8 @@ export const getSettingsSidebarIcon = (key: SettingsTabKey): ReactNode => {
             return <Vault size={14} />
         case "llms":
             return <Sparkle size={14} />
+        case "analytics":
+            return <ChartLineUp size={14} />
         case "tools":
             return <Wrench size={14} />
         case "channels":
@@ -48,6 +52,8 @@ export const getSettingsSidebarIcon = (key: SettingsTabKey): ReactNode => {
             return <ClockCounterClockwise size={14} />
         case "billing":
             return <Receipt size={14} />
+        case "credits":
+            return <Coins size={14} />
         case "account":
             return <User size={14} />
         case "preferences":

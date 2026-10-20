@@ -92,7 +92,11 @@ vi.mock("@agenta/entities/mcpEndpoint", async (importOriginal) => ({
     listMcpTools: vi.fn(async () => []),
 }))
 
-vi.mock("@agenta/entities/secret", () => ({providerConnectionsAtom: {}}))
+vi.mock("@agenta/entities/secret", () => ({
+    providerConnectionsAtom: {},
+    PROVIDER_CATALOG: [],
+    SecretKind: {ProviderKey: "provider_key"},
+}))
 
 vi.mock("jotai", async (importOriginal) => ({
     ...(await importOriginal<typeof import("jotai")>()),
@@ -177,9 +181,9 @@ const mounts: [string, () => Promise<void>][] = [
                     removeItem: vi.fn(),
                     closeEditor: vi.fn(),
                     statusFor: () => undefined,
-                    emptyAdd: null,
                     addOpen: true,
                     onAddClose: vi.fn(),
+                    onAddOpen: vi.fn(),
                 }),
             )
             await click("Reconnect from the add drawer")

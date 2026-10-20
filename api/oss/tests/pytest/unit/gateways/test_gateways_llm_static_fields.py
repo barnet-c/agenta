@@ -13,6 +13,7 @@ from oss.src.core.gateways.llms.providers.passthrough.static_fields import (
     LLMStaticFieldRewrite,
     STATIC_FIELD_REWRITES,
     apply_static_fields,
+    encode_thought_signatures,
 )
 
 _LITERAL_TYPES = (str, int, float, bool, type(None))
@@ -159,7 +160,204 @@ def test_table_entries_are_literal_data_only():
 
 def test_apply_static_fields_signature_cannot_see_request_semantics():
     """The function's signature is the proof (specs-wp27.md): only the table lookup keys
-    (`deployment_kind`, `protocol`) and the raw `body` — nothing that could carry a parsed
-    view of the request's content, so there is nothing for a future edit to read."""
+    (`deployment_kind`, `protocol`, and the route's `provider_key`) and the raw `body` —
+    nothing that could carry a parsed view of the request's content, so there is nothing for
+    a future edit to read."""
     params = list(inspect.signature(apply_static_fields).parameters)
-    assert params == ["deployment_kind", "protocol", "body"]
+    assert params == ["deployment_kind", "protocol", "body", "provider_key"]
+
+
+def _chat_with_tool_calls(*calls) -> bytes:
+    return json.dumps(
+        {
+            "model": "google/gemini-3.8-flash",
+            "messages": [
+                {"role": "user", "content": "run echo hi"},
+                {"role": "assistant", "content": None, "tool_calls": list(calls)},
+                {"role": "tool", "tool_call_id": calls[0]["id"], "content": "hi"},
+            ],
+        }
+    ).encode()
+
+
+def _call(call_id: str, **extra) -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": "bash", "arguments": "{}"},
+        **extra,
+    }
+
+
+@pytest.mark.parametrize(
+    "deployment_kind, provider_key",
+    [(LLMDeploymentKind.VERTEX, None), (LLMDeploymentKind.DIRECT, "gemini")],
+)
+def test_gemini_chat_restores_the_thought_signature_from_the_id(
+    deployment_kind, provider_key
+):
+    """Google reads the signature from `extra_content` only, and wants its own id back."""
+    result = apply_static_fields(
+        deployment_kind=deployment_kind,
+        protocol=LLMProtocol.CHAT_COMPLETIONS,
+        body=_chat_with_tool_calls(_call("call_1__thought__sig"), _call("call_2")),
+        provider_key=provider_key,
+    )
+
+    messages = json.loads(result)["messages"]
+    assert messages[1]["tool_calls"] == [
+        _call("call_1", extra_content={"google": {"thought_signature": "sig"}}),
+        _call("call_2"),
+    ]
+    assert messages[2]["tool_call_id"] == "call_1"
+
+
+def test_other_chat_routes_drop_the_thought_signature_from_the_id():
+    """A session that moves off Gemini must not send ids an OpenAI endpoint would cap."""
+    result = apply_static_fields(
+        deployment_kind=LLMDeploymentKind.DIRECT,
+        protocol=LLMProtocol.CHAT_COMPLETIONS,
+        body=_chat_with_tool_calls(_call("call_1__thought__sig")),
+        provider_key="openai",
+    )
+
+    messages = json.loads(result)["messages"]
+    assert messages[1]["tool_calls"] == [_call("call_1")]
+    assert messages[2]["tool_call_id"] == "call_1"
+
+
+@pytest.mark.parametrize("part", ["delta", "message"])
+def test_encode_thought_signatures_appends_the_signature_to_the_id(part):
+    signed = _call("call_1", extra_content={"google": {"thought_signature": "sig"}})
+    payload = {"choices": [{part: {"tool_calls": [signed, _call("call_2")]}}]}
+
+    assert encode_thought_signatures(payload)
+    calls = payload["choices"][0][part]["tool_calls"]
+    assert [call["id"] for call in calls] == ["call_1__thought__sig", "call_2"]
+    assert calls[0]["extra_content"] == {"google": {"thought_signature": "sig"}}
+
+
+def test_a_vertex_chat_without_tool_calls_relays_byte_for_byte():
+    body = json.dumps(
+        {
+            "model": "google/gemini-3.8-flash",
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+    ).encode()
+
+    assert (
+        apply_static_fields(
+            deployment_kind=LLMDeploymentKind.VERTEX,
+            protocol=LLMProtocol.CHAT_COMPLETIONS,
+            body=body,
+        )
+        is body
+    )
+
+
+def test_other_deployments_keep_unsigned_tool_calls_as_they_are():
+    body = _chat_with_tool_calls(_call("call_1"))
+
+    assert (
+        apply_static_fields(
+            deployment_kind=LLMDeploymentKind.DIRECT,
+            protocol=LLMProtocol.CHAT_COMPLETIONS,
+            body=body,
+            provider_key="openai",
+        )
+        is body
+    )
+
+
+def test_google_openai_endpoint_drops_the_store_field_it_refuses():
+    result = apply_static_fields(
+        deployment_kind=LLMDeploymentKind.DIRECT,
+        protocol=LLMProtocol.CHAT_COMPLETIONS,
+        body=json.dumps(
+            {"model": "gemini-3.7-flash", "store": False, "messages": []}
+        ).encode(),
+        provider_key="gemini",
+    )
+
+    assert json.loads(result) == {"model": "gemini-3.7-flash", "messages": []}
+
+
+def test_google_openai_endpoint_leaves_a_file_part_as_it_came():
+    body = _chat_with_parts(
+        {"type": "file", "file": {"filename": "a.pdf", "file_data": "QUJD"}}
+    )
+
+    assert (
+        apply_static_fields(
+            deployment_kind=LLMDeploymentKind.DIRECT,
+            protocol=LLMProtocol.CHAT_COMPLETIONS,
+            body=body,
+            provider_key="gemini",
+        )
+        is body
+    )
+
+
+def _chat_with_parts(*parts):
+    return json.dumps(
+        {
+            "model": "google/gemini-3.8-flash",
+            "messages": [{"role": "user", "content": [*parts]}],
+        }
+    ).encode()
+
+
+@pytest.mark.parametrize(
+    "file, url",
+    [
+        (
+            {
+                "filename": "doc.pdf",
+                "file_data": "data:application/pdf;base64,JVBERi0x",
+            },
+            "data:application/pdf;base64,JVBERi0x",
+        ),
+        (
+            {"filename": "doc.pdf", "file_data": "JVBERi0x"},
+            "data:application/pdf;base64,JVBERi0x",
+        ),
+    ],
+    ids=["data-url", "bare-base64"],
+)
+def test_vertex_chat_sends_a_file_part_as_the_data_url_gemini_reads(file, url):
+    """Vertex refuses an OpenAI `file` part (HTTP 400) but reads a PDF data URL."""
+    text = {"type": "text", "text": "What is in this file?"}
+    result = apply_static_fields(
+        deployment_kind=LLMDeploymentKind.VERTEX,
+        protocol=LLMProtocol.CHAT_COMPLETIONS,
+        body=_chat_with_parts(text, {"type": "file", "file": file}),
+    )
+
+    assert json.loads(result)["messages"][0]["content"] == [
+        text,
+        {"type": "image_url", "image_url": {"url": url}},
+    ]
+
+
+def test_a_file_part_with_no_data_and_other_deployments_are_relayed_as_they_came():
+    by_id = _chat_with_parts({"type": "file", "file": {"file_id": "file-abc"}})
+    inline = _chat_with_parts(
+        {"type": "file", "file": {"file_data": "data:application/pdf;base64,JVBE"}}
+    )
+
+    assert (
+        apply_static_fields(
+            deployment_kind=LLMDeploymentKind.VERTEX,
+            protocol=LLMProtocol.CHAT_COMPLETIONS,
+            body=by_id,
+        )
+        is by_id
+    )
+    assert (
+        apply_static_fields(
+            deployment_kind=LLMDeploymentKind.DIRECT,
+            protocol=LLMProtocol.CHAT_COMPLETIONS,
+            body=inline,
+        )
+        is inline
+    )

@@ -9,10 +9,9 @@
  * and an open drawer reporting a state the list has already moved past.
  */
 import {getSettingsTabDescription} from "@agenta/settings"
+import {TOUCH_TARGET_MINIMUM_PX, touchTargetHeight} from "@agenta/ui/ui"
 import {act, cleanup, fireEvent, render, screen, within} from "@testing-library/react"
 import {afterEach, beforeEach, describe, expect, it, vi} from "vitest"
-
-import {TOUCH_TARGET_MINIMUM_PX, touchTargetHeight} from "@agenta/ui/ui"
 
 import McpServersSection from "../../src/mcp/McpServersSection"
 
@@ -58,9 +57,21 @@ vi.mock("@agenta/entity-ui/mcpEndpoint", () => ({
         if (open) opened.push(reconnect ?? null)
         return open ? <div data-testid="mcp-connect-journey" /> : null
     },
-    McpConnectionDetail: ({endpoint}: {endpoint: {name?: string; secret_id?: string} | null}) =>
+    McpConnectionDetail: ({
+        endpoint,
+        readOnly,
+        canListTools,
+    }: {
+        endpoint: {name?: string; secret_id?: string} | null
+        readOnly?: boolean
+        canListTools?: boolean
+    }) =>
         endpoint ? (
-            <div data-testid="mcp-connection-detail">
+            <div
+                data-testid="mcp-connection-detail"
+                data-readonly={String(Boolean(readOnly))}
+                data-can-list-tools={String(canListTools)}
+            >
                 {endpoint.name}
                 <span data-testid="detail-secret">{endpoint.secret_id ?? "none"}</span>
             </div>
@@ -115,7 +126,10 @@ interface Endpoint {
     auth_mode: "oauth" | "api_key" | "none"
     secret_id?: string | null
     flags?: {is_valid?: boolean}
-    data: {route: {base_url: string}}
+    data: {
+        route: {base_url: string}
+        check?: {ok: boolean; reason?: string | null; checked_at: string}
+    }
 }
 
 const endpoint = (over: Partial<Endpoint> & Pick<Endpoint, "id" | "name">): Endpoint => ({
@@ -129,12 +143,32 @@ const endpoint = (over: Partial<Endpoint> & Pick<Endpoint, "id" | "name">): Endp
 const LINEAR = endpoint({id: "linear", name: "Linear", auth_mode: "oauth", secret_id: "sec-1"})
 const AXIOM = endpoint({id: "axiom", name: "Axiom", auth_mode: "api_key", secret_id: "sec-2"})
 const MEMORY = endpoint({id: "memory", name: "Memory", auth_mode: "none", secret_id: null})
+// Signed in once, then the provider revoked the grant: the row keeps its handle and the gateway
+// marks it invalid, and the check from that sign-in stays on the row.
 const OCTOLENS = endpoint({
     id: "octolens",
     name: "Octolens",
     auth_mode: "oauth",
-    secret_id: null,
+    secret_id: "sec-3",
+    flags: {is_valid: false},
+    data: {
+        route: {base_url: "https://mcp.octolens.example/mcp"},
+        check: {ok: true, checked_at: "2026-10-14T12:00:00Z"},
+    },
 })
+// Signed in once, then the person pressed Disconnect: the grant is gone and the check stayed.
+const DISCONNECTED = endpoint({
+    id: "disconnected",
+    name: "Disconnected",
+    auth_mode: "oauth",
+    secret_id: null,
+    data: {
+        route: {base_url: "https://mcp.disconnected.example/mcp"},
+        check: {ok: true, checked_at: "2026-10-14T12:00:00Z"},
+    },
+})
+// Made by a connect sheet whose sign-in has not finished.
+const PENDING = endpoint({id: "pending", name: "Pending", auth_mode: "oauth", secret_id: null})
 
 const state: {
     query: {data: Endpoint[] | undefined; isPending: boolean}
@@ -146,10 +180,19 @@ const ALL_SECRETS = [
     {id: "sec-2", name: "axiom_token", slug: "axiom_token"},
 ]
 
-const show = (rows: Endpoint[], options: {isPending?: boolean; readOnly?: boolean} = {}) => {
+const show = (
+    rows: Endpoint[],
+    options: {isPending?: boolean; readOnly?: boolean; canListTools?: boolean} = {},
+) => {
     state.query = {data: rows, isPending: options.isPending ?? false}
     state.secrets = ALL_SECRETS
-    return render(<McpServersSection confirm={confirmSpy} readOnly={options.readOnly} />)
+    return render(
+        <McpServersSection
+            confirm={confirmSpy}
+            readOnly={options.readOnly}
+            canListTools={options.canListTools}
+        />,
+    )
 }
 
 let confirmSpy: ReturnType<typeof vi.fn>
@@ -175,7 +218,7 @@ for (const method of ["hasPointerCapture", "setPointerCapture", "releasePointerC
 
 /** The kebab in a row's trailing cell. Radix opens the menu on pointerdown, not click. */
 const openRowMenu = (name: string) => {
-    const row = screen.getByText(name).closest("tr") as HTMLTableRowElement
+    const row = screen.getByText(name).closest('[role="button"]') as HTMLElement
     const kebab = within(row).getAllByRole("button").at(-1) as HTMLElement
     act(() => {
         fireEvent.pointerDown(kebab, {bubbles: true, button: 0, ctrlKey: false})
@@ -185,39 +228,12 @@ const openRowMenu = (name: string) => {
 const menuItems = () => screen.getAllByRole("menuitem").map((item) => item.textContent?.trim())
 
 /** The colour the dot and its label carry, which `StatusIndicator` puts on its wrapper. */
+// The indicator sits above the last-check line, in the cell's first column.
 const statusTone = (cell: HTMLElement) =>
-    (cell.firstElementChild as HTMLElement | null)?.className ?? ""
-
-/**
- * The viewport the case means, since two of the four columns are a wider screen's.
- *
- * jsdom implements no `matchMedia`, so without this every breakpoint reads false and every
- * case would silently be a phone. Cases that do not say otherwise are a desktop, which is what
- * the spec's 1000px page is.
- */
-const setViewport = (width: number) => {
-    Object.defineProperty(window, "matchMedia", {
-        writable: true,
-        configurable: true,
-        value: (query: string) => {
-            const min = Number(/min-width:\s*(\d+)px/.exec(query)?.[1] ?? 0)
-            return {
-                matches: width >= min,
-                media: query,
-                onchange: null,
-                addListener: () => undefined,
-                removeListener: () => undefined,
-                addEventListener: () => undefined,
-                removeEventListener: () => undefined,
-                dispatchEvent: () => false,
-            }
-        },
-    })
-}
+    (cell.firstElementChild?.firstElementChild as HTMLElement | null)?.className ?? ""
 
 beforeEach(() => {
     opened.length = 0
-    setViewport(1440)
     confirmSpy = vi.fn()
     setters.remove.mockReset()
     setters.disconnect.mockReset()
@@ -234,28 +250,12 @@ describe("the registry table", () => {
         }
     })
 
-    it("keeps what identifies and acts on a row at phone width, and drops the details", () => {
-        // Measured, the four columns are a 986px table, which a 348px phone can only scroll
-        // sideways. The acceptance is that it reflows instead, and the table's own mechanism for
-        // that is a per-column breakpoint. The URL and the auth are one tap away in the row.
-        setViewport(430)
-        show([LINEAR])
-
-        expect(screen.getByRole("columnheader", {name: "Name"})).toBeTruthy()
-        expect(screen.getByRole("columnheader", {name: "Status"})).toBeTruthy()
-        expect(screen.queryByRole("columnheader", {name: "Server URL"})).toBeNull()
-        expect(screen.queryByRole("columnheader", {name: "Auth"})).toBeNull()
-        // The row still says which server it is, which is what a narrow table is for.
-        expect(screen.getByTestId("mcp-connection-name").textContent).toBe("Linear")
-    })
-
     it("leads each row with the server tile and the connection name", () => {
         const {container} = show([LINEAR])
         expect(screen.getByTestId("mcp-connection-name").textContent).toBe("Linear")
-        // One generic tile per row, at the 24px size the spec's Name cell draws.
+        // One generic tile per row, at the 28px size the Name cell draws.
         const tile = container.querySelector('[data-slot="icon-tile"]')
-        expect(tile?.getAttribute("data-size")).toBe("24")
-        expect(tile?.getAttribute("data-tone")).toBe("info")
+        expect(tile?.getAttribute("data-size")).toBe("28")
     })
 
     it("shows the server URL", () => {
@@ -300,7 +300,14 @@ describe("the status cell", () => {
         expect(within(cell).queryByRole("button", {name: "Reconnect"})).toBeNull()
     })
 
-    it("reads Login expired with an inline Reconnect when the grant is gone", () => {
+    it("reads Not signed in for a connection the person disconnected", () => {
+        show([DISCONNECTED])
+        const cell = screen.getByTestId("mcp-connection-status")
+        expect(within(cell).getByText("Not signed in")).toBeTruthy()
+        expect(within(cell).queryByText("Login expired")).toBeNull()
+    })
+
+    it("reads Login expired with an inline Reconnect when the grant was revoked", () => {
         show([OCTOLENS])
         const cell = screen.getByTestId("mcp-connection-status")
         expect(within(cell).getByText("Login expired")).toBeTruthy()
@@ -309,6 +316,13 @@ describe("the status cell", () => {
         expect(statusTone(cell)).toContain("text-colorWarning")
         expect(statusTone(cell)).not.toContain("text-colorSuccess")
         expect(within(cell).getByRole("button", {name: "Reconnect"})).toBeTruthy()
+    })
+
+    it("reads Not signed in for a connection whose first sign-in is under way", () => {
+        show([PENDING])
+        const cell = screen.getByTestId("mcp-connection-status")
+        expect(within(cell).getByText("Not signed in")).toBeTruthy()
+        expect(statusTone(cell)).toContain("text-colorWarning")
     })
 
     it("reads Login expired for a key the server stopped accepting", () => {
@@ -324,6 +338,39 @@ describe("the status cell", () => {
         // The two the page can actually tell apart, and the old wording for neither.
         expect(screen.queryByText("Needs authorization")).toBeNull()
         expect(screen.queryByText("Needs input")).toBeNull()
+    })
+
+    it("says when a connection was last checked, and why a failed check failed", () => {
+        const minutesAgo = (minutes: number) =>
+            new Date(Date.now() - minutes * 60 * 1000).toISOString()
+        show([
+            {
+                ...LINEAR,
+                data: {...LINEAR.data, check: {ok: true, checked_at: minutesAgo(5)}},
+            },
+            {
+                ...AXIOM,
+                data: {
+                    ...AXIOM.data,
+                    check: {
+                        ok: false,
+                        reason: "The server did not accept that credential.",
+                        checked_at: minutesAgo(120),
+                    },
+                },
+            },
+        ])
+        expect(
+            screen.getAllByTestId("mcp-connection-check").map((line) => line.textContent),
+        ).toEqual([
+            "Checked 5m ago",
+            "Check failed 2h ago: The server did not accept that credential.",
+        ])
+    })
+
+    it("shows no check line for a connection nobody has checked", () => {
+        show([LINEAR])
+        expect(screen.queryByTestId("mcp-connection-check")).toBeNull()
     })
 
     it("opens the reconnect journey without also opening the connection", () => {
@@ -347,8 +394,8 @@ describe("the row menu", () => {
         openRowMenu("Linear")
         expect(menuItems()).toEqual(["Reconnect", "View tools", "Rename", "Disconnect", "Remove"])
         for (const verb of ["Disconnect", "Remove"]) {
-            expect(screen.getByRole("menuitem", {name: verb}).className).toContain(
-                "text-colorError",
+            expect(screen.getByRole("menuitem", {name: verb}).getAttribute("data-variant")).toBe(
+                "destructive",
             )
         }
     })
@@ -380,8 +427,8 @@ describe("the row menu", () => {
     it("hides Disconnect once the grant is already gone", () => {
         // Two rows, and the second is the one asked about: a section that hands over whichever
         // row it finds first passes every single-row fixture ever written (D154).
-        show([LINEAR, OCTOLENS])
-        openRowMenu("Octolens")
+        show([LINEAR, DISCONNECTED])
+        openRowMenu("Disconnected")
         expect(screen.queryByRole("menuitem", {name: "Disconnect"})).toBeNull()
     })
 })
@@ -425,13 +472,15 @@ describe("viewing a connection's tools", () => {
         expect(screen.queryByTestId("mcp-connection-detail")).toBeNull()
     })
 
-    it("opens the rename drawer for Rename", () => {
+    it("renames in place for Rename, opening no panel", async () => {
         show([LINEAR])
         openRowMenu("Linear")
         act(() => {
             fireEvent.click(screen.getByRole("menuitem", {name: "Rename"}))
         })
-        expect(screen.getByTestId("mcp-connection-detail")).toBeTruthy()
+        // Rename runs once the menu has closed and handed focus back.
+        expect(await screen.findByRole("textbox", {name: "Connection name"})).toBeTruthy()
+        expect(screen.queryByTestId("mcp-connection-detail")).toBeNull()
         expect(screen.queryByTestId("mcp-permission-drawer")).toBeNull()
     })
 
@@ -545,16 +594,14 @@ describe("the empty page", () => {
                 "Connect a server by URL. You'll sign in or add a key once; agents in this project can then add it and choose what it may run.",
             ),
         ).toBeTruthy()
-        // The header button is dropped in favour of the one in the panel, so the same action is
-        // never offered twice on one screen.
-        expect(screen.getAllByTestId("mcp-connect-open")).toHaveLength(1)
+        // The header keeps its button like every Settings page; the panel offers it too.
+        expect(screen.getAllByTestId("mcp-connect-open")).toHaveLength(2)
     })
 
-    it("draws the muted tile, not the row tile", () => {
+    it("draws the empty state's icon, not a row tile", () => {
         const {container} = show([])
-        const tile = container.querySelector('[data-slot="icon-tile"]')
-        expect(tile?.getAttribute("data-size")).toBe("44")
-        expect(tile?.getAttribute("data-tone")).toBe("muted")
+        expect(container.querySelector('[data-slot="empty-icon"]')).not.toBeNull()
+        expect(container.querySelector('[data-slot="icon-tile"]')).toBeNull()
     })
 
     it("says nothing at all while the list is still loading", () => {
@@ -566,7 +613,7 @@ describe("the empty page", () => {
 describe("loading", () => {
     it("holds three rows' worth of space rather than collapsing the page", () => {
         const {container} = show([], {isPending: true})
-        expect(container.querySelectorAll("tbody tr")).toHaveLength(3)
+        expect(container.querySelectorAll('div[aria-hidden="true"] > div.grid')).toHaveLength(3)
     })
 })
 
@@ -580,8 +627,35 @@ describe("read-only", () => {
 
     it("drops the row menu with it", () => {
         show([LINEAR], {readOnly: true})
-        const row = screen.getByText("Linear").closest("tr") as HTMLTableRowElement
+        const row = screen.getByText("Linear").closest('[role="button"]') as HTMLElement
         expect(within(row).queryAllByRole("button")).toHaveLength(0)
+    })
+
+    it("opens the connection read-only, so its detail offers no write either", () => {
+        show([AXIOM], {readOnly: true, canListTools: false})
+        act(() => {
+            fireEvent.click(screen.getByTestId("mcp-connection-name"))
+        })
+        const detail = screen.getByTestId("mcp-connection-detail")
+        expect(detail.dataset.readonly).toBe("true")
+        expect(detail.dataset.canListTools).toBe("false")
+    })
+
+    it("leaves View tools out of the row menu when the member may not read tools", () => {
+        show([LINEAR], {canListTools: false})
+        openRowMenu("Linear")
+        expect(screen.queryByRole("menuitem", {name: "View tools"})).toBeNull()
+        expect(screen.getByRole("menuitem", {name: "Rename"})).toBeTruthy()
+    })
+
+    it("opens the connection writable, with its tools, when nothing is withheld", () => {
+        show([AXIOM])
+        act(() => {
+            fireEvent.click(screen.getByTestId("mcp-connection-name"))
+        })
+        const detail = screen.getByTestId("mcp-connection-detail")
+        expect(detail.dataset.readonly).toBe("false")
+        expect(detail.dataset.canListTools).toBe("true")
     })
 })
 

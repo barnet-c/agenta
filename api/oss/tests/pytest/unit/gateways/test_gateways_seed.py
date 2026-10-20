@@ -205,12 +205,18 @@ def test_policy_exceptions():
     assert ceiling.requested == 8192
 
 
-def test_secret_resolver_interface_is_abstract_with_three_methods():
+def test_secret_resolver_interface_is_abstract_with_four_methods():
     # `provider_connection_by_slug` joined the two originals when a standard connection
     # became addressable by its own slug (OR53): the slug names a stored secret, so only
     # the resolver can say which connection it is and which provider family it speaks.
+    # `has_connection` lets the retired starter-credits alias confirm the vault row is gone.
     assert SecretsResolverInterface.__abstractmethods__ == frozenset(
-        {"resolve", "available_provider_keys", "provider_connection_by_slug"}
+        {
+            "resolve",
+            "available_provider_keys",
+            "provider_connection_by_slug",
+            "has_connection",
+        }
     )
     with pytest.raises(TypeError):
         SecretsResolverInterface()
@@ -418,8 +424,11 @@ def test_mcp_relay_result_and_ports():
             "bind_endpoint_secret",
             "invalidate_endpoint_secret",
             "cache_endpoint_discovery",
+            "record_endpoint_check",
             "delete_endpoint",
             "query_endpoints",
+            # Serializes every change to one connection's OAuth state.
+            "oauth_lock",
         }
     )
     assert MCPUpstreamInterface.__abstractmethods__ == frozenset({"relay"})

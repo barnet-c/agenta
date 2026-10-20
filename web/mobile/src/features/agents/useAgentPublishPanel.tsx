@@ -1,12 +1,15 @@
 import {useCallback} from "react"
 
+import {getChannelsClient} from "@agenta/sdk/resources"
 import {
     AgentApiPanel,
+    AgentEmbedPanel,
     ChannelsPanelSheet,
     agentHostFromApiUrl,
     useChannelPanel,
     type ChannelsPanelRenderProps,
 } from "@agenta/settings-ui"
+import {useRouter} from "next/router"
 
 import {getApiUrl} from "@/lib/env"
 
@@ -23,6 +26,7 @@ export const useAgentPublishPanel = ({
     resolveAgentName,
     projectId,
     workspaceId,
+    side,
 }: {
     agentId: string
     agentName?: string
@@ -32,7 +36,10 @@ export const useAgentPublishPanel = ({
     resolveAgentName?: (id: string) => string | null
     projectId: string
     workspaceId: string
+    /** Where the panel opens on a phone; the playground passes `right`. */
+    side?: "responsive" | "right"
 }) => {
+    const {basePath} = useRouter()
     const {connections, loading, loadError, actions} = useAgentChannels(agentId, {
         resolveAgentName,
     })
@@ -44,7 +51,9 @@ export const useAgentPublishPanel = ({
         loading,
         loadError,
         actions,
-        renderPanel: (props: ChannelsPanelRenderProps) => <ChannelsPanelSheet {...props} />,
+        renderPanel: (props: ChannelsPanelRenderProps) => (
+            <ChannelsPanelSheet {...props} side={side} />
+        ),
         // The same hub the header's Publish opens, API included.
         api: (
             <AgentApiPanel
@@ -52,6 +61,16 @@ export const useAgentPublishPanel = ({
                 projectId={projectId}
                 workspaceId={workspaceId}
                 host={agentHostFromApiUrl(getApiUrl())}
+            />
+        ),
+        embed: (view) => (
+            <AgentEmbedPanel
+                {...view}
+                client={getChannelsClient()}
+                projectId={projectId}
+                agentId={agentId}
+                agentName={agentName}
+                widgetUrl={(embedId) => `${window.location.origin}${basePath}/embed/${embedId}`}
             />
         ),
     })

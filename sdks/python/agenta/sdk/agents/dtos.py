@@ -30,6 +30,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -717,13 +718,20 @@ class RunContext(BaseModel):
 class SessionContext(BaseModel):
     """API-supplied facts rendered by the SDK for the current turn.
 
-    These are prompt inputs, not tool bindings or environment configuration.
+    The name and turn facts are prompt inputs, not tool bindings or environment configuration.
     The runner receives only the rendered text as ``turnContext``.
+
+    ``runner_address`` is not a prompt input. It is the runner pod that ran the session's last
+    turn, a routing hint the transport prefers over the Service URL. ``runner_replica_id`` is
+    that pod's replica id: the transport uses the address only when the pod there answers with
+    it. Neither is rendered and neither rides the ``/run`` body.
     """
 
     agent_name: Optional[str] = None
     session_name: Optional[str] = None
     first_turn: Optional[bool] = None
+    runner_address: Optional[str] = None
+    runner_replica_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +753,8 @@ class AgentResult(BaseModel):
     session_id: Optional[str] = None
     model: Optional[str] = None
     trace_id: Optional[str] = None
+    # The sandbox provider the run executed on, after the runner's harness routing.
+    sandbox: Optional[str] = None
 
 
 class SandboxSecretReference(BaseModel):
@@ -896,20 +906,31 @@ class AgentTemplate(BaseModel):
         instructions, model, tools = _parse_agent_fields(params, base)
         harness, sandbox, permission_default = _parse_run_selection(params, base)
         harness_permissions, harness_extras = _parse_harness_slice(params, base)
-        return cls(
-            instructions=instructions,
-            model=model,
-            tools=_as_list(tools),
-            mcp_servers=_parse_mcp_servers_raw(params, base),
-            skills=_parse_skills_raw(params, base),
-            harness_permissions=harness_permissions,
-            harness_extras=harness_extras,
-            sandbox_permission=_parse_sandbox_permission(params, base),
-            sandbox_credentials=_parse_sandbox_credentials(params, base),
-            harness=harness,
-            sandbox=sandbox,
-            permission_default=permission_default,
-        )
+        try:
+            return cls(
+                instructions=instructions,
+                model=model,
+                tools=_as_list(tools),
+                mcp_servers=_parse_mcp_servers_raw(params, base),
+                skills=_parse_skills_raw(params, base),
+                harness_permissions=harness_permissions,
+                harness_extras=harness_extras,
+                sandbox_permission=_parse_sandbox_permission(params, base),
+                sandbox_credentials=_parse_sandbox_credentials(params, base),
+                harness=harness,
+                sandbox=sandbox,
+                permission_default=permission_default,
+            )
+        except ValidationError as error:
+            # A field value the template does not accept (a `connection.mode` it does not
+            # know, say) is the caller's configuration, not a server fault: answer 400. Name
+            # each field and the rule only; the raw input values may hold credentials.
+            raise AgentTemplateShapeError(
+                "; ".join(
+                    f"{'.'.join(str(part) for part in issue['loc'])}: {issue['msg']}"
+                    for issue in error.errors()
+                )
+            ) from error
 
 
 # ---------------------------------------------------------------------------

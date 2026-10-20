@@ -52,6 +52,8 @@ export const sanitizeErrorText = (text: string): string =>
             "$2=[secret]",
         )
         .replace(/\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9._-]+/g, "[secret]")
+        // A provider's own masked copy of the key ("sk-proj-****...abcd") still shows its ends.
+        .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{0,24}(?:\*{3,}|\.{3,})[A-Za-z0-9_-]*/g, "[secret]")
         .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, "[secret]")
         .trim()
 
@@ -98,7 +100,7 @@ export const readableTraceError = (raw?: string | null): string | null => {
               .slice(0, 300)
               .replace(/[.!?]?$/, ".")
         : ""
-    if (status === "429" || status.startsWith("5"))
+    if (status === "408" || status === "429" || status.startsWith("5"))
         return `The model provider could not answer (HTTP ${status})${said ? `: ${said}` : "."} Try again in a moment.`
     return `The model provider refused the request (HTTP ${status})${said ? `: ${said}` : "."}`
 }
@@ -117,6 +119,8 @@ export interface TurnStatus {
     hasReasoning: boolean
     hasContent: boolean
     noResponse: boolean
+    /** The user stopped this turn, so an empty answer is not a non-response. */
+    stopped: boolean
     errorText: string | null
     /** The failure class, only while an error is actually shown. */
     errorCode: string | null
@@ -149,11 +153,12 @@ export const deriveTurnStatus = (
     )
     const hasContent = hasAnswer || hasReasoning
 
+    const stopped = !isUser && (message.metadata as {runStopped?: boolean})?.runStopped === true
     // A settled assistant turn (NOT the one being generated) with no answer — only a thought,
     // or nothing — means the model ended without responding. Surface it so the bubble doesn't
     // read as frozen/broken. Keyed on `isStreaming`, not the conversation-level `busy`, so
     // earlier answer-less turns don't all light up while a later turn streams.
-    const noResponse = !isUser && !isStreaming && !hasAnswer
+    const noResponse = !isUser && !isStreaming && !hasAnswer && !stopped
 
     // A trace-leaf error means a model/tool call failed. When the turn still produced an answer,
     // the agent recovered from it — that failure belongs inline in ToolActivity ("· N failed"),
@@ -187,6 +192,7 @@ export const deriveTurnStatus = (
         hasReasoning,
         hasContent,
         noResponse,
+        stopped,
         errorText,
         errorCode: shownErrorCode,
         showError,

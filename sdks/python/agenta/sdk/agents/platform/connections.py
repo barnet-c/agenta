@@ -631,19 +631,31 @@ SUBSCRIPTION_SECRET_KIND = "subscription_provider"
 # The login state a run needs. Any other state means the person must sign in again.
 _SUBSCRIPTION_READY = "ready"
 
-# The provider family a subscription resolves to, per harness. Pi reaches the ChatGPT
-# subscription through its ``openai-codex`` provider, which the capability table already
-# declares, so the resolved pair passes the harness check without a new capability.
-#
-# Pi is the only entry. Codex 0.145.0 refuses a login file without an ``id_token`` and the
-# ChatGPT device login never issues one, so the same credential cannot be handed to it. Add
-# a harness here once its credential format is supported end to end.
-_SUBSCRIPTION_HARNESS_PROVIDERS: Dict[str, str] = {
-    "pi_core": "openai-codex",
-}
+# The environment variable Claude Code reads a `claude setup-token` value from.
+_CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
-# The subscription providers a run can consume. `chatgpt` is the only one today.
-_SUBSCRIPTION_PROVIDERS = frozenset({"chatgpt"})
+
+@dataclass(frozen=True)
+class _SubscriptionRun:
+    """The one harness a subscription provider runs on, and the provider family it uses."""
+
+    harness: str
+    harness_name: str
+    provider: str
+
+
+# Pi reaches the ChatGPT subscription through its ``openai-codex`` provider, which the
+# capability table already declares. Codex 0.145.0 refuses a login file without an
+# ``id_token`` and the ChatGPT device login never issues one, so ChatGPT stays on Pi. Claude
+# Code reads the Claude setup-token under the ``anthropic`` family.
+_SUBSCRIPTION_RUNS: Dict[str, _SubscriptionRun] = {
+    "chatgpt": _SubscriptionRun(
+        harness="pi_core", harness_name="Pi", provider="openai-codex"
+    ),
+    "claude": _SubscriptionRun(
+        harness="claude", harness_name="Claude Code", provider="anthropic"
+    ),
+}
 
 
 @dataclass
@@ -692,14 +704,6 @@ def _subscription_candidate(secret: Dict[str, Any]) -> Optional[_SubscriptionCan
     )
 
 
-def _subscription_provider(harness: Optional[str]) -> str:
-    """The provider family this subscription resolves to for ``harness``.
-
-    Callers check the harness first, so the mapping always holds an entry here.
-    """
-    return _SUBSCRIPTION_HARNESS_PROVIDERS[harness or ""]
-
-
 def _resolve_subscription(
     *,
     secrets: Sequence[Any],
@@ -709,9 +713,9 @@ def _resolve_subscription(
 ) -> ResolvedConnection:
     """Resolve a ``self_managed`` connection that names a hosted subscription secret.
 
-    The credential mode stays ``runtime_provided`` and the environment stays empty: the
-    harness still authenticates itself. What changes is that Agenta now delivers the login
-    the harness signs in with, as the ``subscription`` block beside the connection.
+    A ChatGPT login stays ``runtime_provided``: the harness authenticates itself with the
+    login Agenta delivers as the ``subscription`` block, and refreshes it during the turn. A
+    Claude setup-token never refreshes, so it travels as an ordinary environment credential.
     """
     chosen: Optional[_SubscriptionCandidate] = None
     for item in secrets:
@@ -723,27 +727,38 @@ def _resolve_subscription(
             chosen = candidate
             break
 
-    # The pair is checked before the login state: signing in again would not help a run
-    # that cannot consume the credential in the first place.
-    if (harness or "") not in _SUBSCRIPTION_HARNESS_PROVIDERS:
-        raise SubscriptionNotSupportedError(
-            harness=harness, provider=chosen.provider if chosen else ""
-        )
-
     if chosen is None:
         # The config names a connection this project does not hold. Signing in cannot fix a
         # name, so this is not the sign-in prompt.
         raise SubscriptionConnectionMissingError(slug=slug)
+
+    # The pair is checked before the login state: signing in again would not help a run
+    # that cannot consume the credential in the first place.
+    run = _SUBSCRIPTION_RUNS.get(chosen.provider)
+    if run is None or harness != run.harness:
+        raise SubscriptionNotSupportedError(
+            harness=harness,
+            provider=chosen.provider,
+            supported_harness=run.harness_name if run else None,
+        )
 
     if not chosen.is_ready():
         # One error for a not-ready state and an absent login: the person takes the same
         # action in both cases. Never name the login or its state here.
         raise SubscriptionLoginRequiredError(slug=slug, provider=chosen.provider)
 
-    if chosen.provider not in _SUBSCRIPTION_PROVIDERS:
-        raise SubscriptionNotSupportedError(harness=harness, provider=chosen.provider)
+    provider = run.provider
+    if chosen.provider == "claude":
+        return build_resolved_connection(
+            provider=provider,
+            model=model.model,
+            credential_mode="env",
+            values={_CLAUDE_TOKEN_ENV: chosen.login.get("access", "")},
+            input_modalities=model_input_modalities(
+                harness, model.model, provider=provider
+            ),
+        )
 
-    provider = _subscription_provider(harness)
     return build_resolved_connection(
         provider=provider,
         model=model.model,
@@ -751,7 +766,7 @@ def _resolve_subscription(
         values={},
         # A miss means workspace-only downstream; do not guess.
         input_modalities=model_input_modalities(
-            harness, model.model, provider=provider or None
+            harness, model.model, provider=provider
         ),
         subscription=ResolvedSubscription(
             id=chosen.id,
@@ -1009,7 +1024,8 @@ def _llm_gateway_is_unavailable(
     Two shapes mean it, and they are the same situation seen from two API versions.
 
     ``llm_gateway_disabled`` is the current one: the route is there and the operator has the
-    plane switched off. An unrouted 404 is the older one: an SDK newer than its backend is an
+    plane switched off, or the gateway does not serve agents on this connection (a Bedrock
+    connection, `LLMGatewayConnectionNotServedError` in the API). An unrouted 404 is the older one: an SDK newer than its backend is an
     ordinary state during a rolling upgrade, and that backend has no gateway at all.
 
     Nothing else qualifies. A 403 from the permission check, a 409 for a missing secret, a 422
@@ -1037,7 +1053,7 @@ class VaultConnectionResolver:
     def __init__(self, connection: Optional[PlatformConnection] = None) -> None:
         self._connection = connection or PlatformConnection()
 
-    async def _gateway_credentials(self) -> Optional[str]:
+    async def _gateway_credentials(self, context: RuntimeAuthContext) -> Optional[str]:
         """The gateway-confined credential this resolution hands to the sandbox.
 
         A refusal surfaces as a resolution error rather than as a missing credential: the
@@ -1045,7 +1061,11 @@ class VaultConnectionResolver:
         operator from hunting a phantom "no backend configured" misconfiguration.
         """
         try:
-            return await self._connection.gateway_authorization(plane="llm")
+            return await self._connection.gateway_authorization(
+                plane="llm",
+                session_id=context.session_id,
+                agent_id=context.agent_id,
+            )
         except GatewayCredentialsError as exc:
             raise ConnectionResolutionError(str(exc)) from exc
 
@@ -1150,6 +1170,7 @@ class VaultConnectionResolver:
                         "model": model.model,
                         "provider_key": model.provider,
                         "connection_slug": model.connection.slug,
+                        "connection_namespace": model.connection.namespace,
                     },
                 )
         except Exception as exc:  # pylint: disable=broad-except
@@ -1177,6 +1198,10 @@ class VaultConnectionResolver:
                 body=body,
             )
             if _llm_gateway_is_unavailable(body=body, refusal=refusal):
+                # A built-in model has no vault record, and the vault may hold a custom
+                # connection of the same slug that the customer pays for instead.
+                if model.connection.namespace == "builtin":
+                    raise refusal
                 return await self._resolve_from_vault(
                     api_base=api_base,
                     authorization=authorization,
@@ -1192,7 +1217,7 @@ class VaultConnectionResolver:
         # NOT `authorization`. That value reads the vault in plaintext, and this one crosses
         # into the sandbox, where the gateway's whole premise is that nothing able to reach a
         # provider key lives there. Exchanged for a gateway-audience credential instead.
-        gateway_credentials_value = await self._gateway_credentials()
+        gateway_credentials_value = await self._gateway_credentials(context)
 
         # Keep the in-memory/static resolver's list shape as a test/replay compatibility
         # path. A live API always returns the non-secret ``connection`` object above.

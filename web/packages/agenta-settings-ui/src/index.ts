@@ -1,5 +1,9 @@
 export type {ConfirmDestructive} from "./confirm"
-export {default as SettingsPageShell, type SettingsPageShellProps} from "./SettingsPageShell"
+export {
+    default as SettingsPageShell,
+    SettingsPageActions,
+    type SettingsPageShellProps,
+} from "./SettingsPageShell"
 export {ThemePicker, type ThemePickerProps, type ThemeChoice} from "./ThemePicker"
 export {
     PreferencesPage,
@@ -47,6 +51,24 @@ export {
     checkoutBillingSubscription,
     openBillingPortal,
 } from "./billing/api"
+export {liveChatAllowed, type LiveChatPlan} from "./billing/liveChatAllowed"
+export {
+    BuyCreditsDialog,
+    CreditTopUpsSection,
+    readTopUpReturn,
+    topUpEntry,
+    TopUpReturnNotice,
+    useTopUpOffer,
+    withoutTopUpQuery,
+    TOP_UP_QUERY,
+    type BuyCreditsDialogProps,
+    type CreditTopUpsSectionProps,
+    type TopUpEntry,
+    type TopUpOffer,
+    type TopUpPack,
+    type TopUpReturn,
+    type TopUpStatus,
+} from "./billing/topups"
 export {
     useBillingCatalog,
     type BillingCatalog,
@@ -134,6 +156,7 @@ export {
     type ChannelsPanelSheetProps,
     type UseChannelPanelOptions,
     type ChannelsRoute,
+    type EmbedViewProps,
     type ChannelsHubViewProps,
     type ChannelsSettingsPageProps,
     type ChannelConnectFlowProps,
@@ -155,15 +178,17 @@ export type {
     HostedTelegramLink,
 } from "./channels"
 
-// The agent header's Publish button and the panel it opens: Slack, Telegram and API.
+// The agent header's Publish button and the panel it opens: the channels, API and Embed.
 export {
     PublishButton,
     AgentPublish,
     AgentApiPanel,
+    AgentEmbedPanel,
     AGENT_INVOKE_DOCS_URL,
     agentHostFromApiUrl,
     buildAgentSnippets,
     type AgentApiPanelProps,
+    type AgentEmbedPanelProps,
     type AgentPublishProps,
     type AgentSnippetLang,
     type PublishButtonProps,

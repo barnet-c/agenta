@@ -106,6 +106,9 @@ services:
             - ${ENV_FILE:-./.env.ee.dev}
         environment:
             AGENTA_SERVICES_INTERNAL_KEY: ""
+            # The embed page fetches its config from the server side, where AGENTA_API_URL
+            # (often http://localhost/api) points at this container, not at the API.
+            AGENTA_API_INTERNAL_URL: ${AGENTA_API_INTERNAL_URL:-http://api:8000}
             DOCKER_NETWORK_MODE: ${DOCKER_NETWORK_MODE:-bridge}
             WATCHPACK_POLLING: "true"
         # === NETWORK ============================================== #
@@ -464,6 +467,8 @@ services:
         image: agenta-ee-dev-runner:latest
         # === EXECUTION ============================================ #
         init: true
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
         # `tsx watch` restarts the server on every source change, matching the OSS dev
         # compose. A dev runner without reload serves stale code after every landing until
         # someone remembers to recreate it. The old no-watcher rationale (shared inotify
@@ -536,6 +541,9 @@ services:
             # admit the run and then strand it inside the sandbox. Default off; see
             # docs/docs/self-host/reference/01-configuration.mdx.
             AGENTA_GATEWAYS_INSECURE_HTTP_ALLOWED: ${AGENTA_GATEWAYS_INSECURE_HTTP_ALLOWED:-}
+            # The API's wallet switch, mirrored: on, the runner asks the wallet before a Daytona
+            # turn and reports its sandbox seconds; off, it makes neither call.
+            AGENTA_WALLETS_ENABLED: ${AGENTA_WALLETS_ENABLED:-}
         # === STORAGE ============================================== #
         volumes:
             - ../../../services/runner/src:/app/src
@@ -884,7 +892,7 @@ services:
                 --forward-to,
                 http://api:8000/billing/stripe/events/,
                 --events,
-                "customer.subscription.created,customer.subscription.deleted,invoice.updated,invoice.upcoming,invoice.payment_failed,invoice.payment_succeeded",
+                "customer.subscription.created,customer.subscription.deleted,invoice.updated,invoice.upcoming,invoice.payment_failed,invoice.payment_succeeded,checkout.session.completed",
             ]
         # === CONFIGURATION ======================================== #
         env_file:

@@ -35,9 +35,10 @@ const optionFor = (row: PickerConnectionRow, model: PickerModelRow, ambiguous: b
         value: model.modelId,
         key: modelRowKey(row.key, model),
         // The flat search view has no column to say where a result came from, so it says so itself.
-        searchCaption: row.name,
+        searchCaption: model.connectionName,
         metadata: {
             ...(model.slug ? {connectionSlug: model.slug} : {}),
+            ...(model.namespace ? {connectionNamespace: model.namespace} : {}),
             connectionMode: model.mode,
             harness: model.harness,
             ...(model.provider ? {provider: model.provider} : {}),
@@ -98,7 +99,7 @@ export const buildPickerGroupsWithSections = (rows: PickerConnectionRow[]): Prov
                 : {}),
             // A row that cannot run anything says so under its name instead of disappearing.
             ...(row.disabled ? {disabled: true} : {}),
-            ...(row.hint ? {caption: row.hint} : {}),
+            ...(row.hint || row.source ? {caption: row.hint ?? row.source} : {}),
             sections,
             options: sections.flatMap((section) => section.options),
         }

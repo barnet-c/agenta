@@ -3,7 +3,7 @@ from uuid import UUID
 from typing import List
 
 from fastapi.responses import JSONResponse
-from fastapi import APIRouter, Request, status, HTTPException
+from fastapi import APIRouter, Depends, Request, Response, status, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 
@@ -26,21 +26,28 @@ from oss.src.core.secrets.subscription_service import (
     SubscriptionLoginService,
 )
 from oss.src.core.secrets.types import (
+    SecretSlugConflict,
     ServerOwnedFieldNotWritable,
     SubscriptionLoginAttemptNotFound,
     SubscriptionLoginRunnerNotConfigured,
     SubscriptionLoginRunnerUnavailable,
     SubscriptionProviderConflict,
+    SubscriptionProviderMismatch,
     SubscriptionSecretNotFound,
+    SubscriptionTokenError,
+    SubscriptionTokenRejected,
 )
 
 from oss.src.apis.fastapi.vault.models import (
     SubscriptionLoginAttemptResponse,
     SubscriptionLoginFailureRequest,
     SubscriptionLoginFailureResponse,
+    SubscriptionLoginOutcomeRequest,
     SubscriptionLoginPushRequest,
     SubscriptionLoginPushResponse,
+    SubscriptionTokenRequest,
 )
+from oss.src.apis.fastapi.shared.runner_auth import assert_runner_token
 
 from oss.src.core.access.permissions.types import Permission
 from oss.src.core.access.permissions.service import check_action_access
@@ -79,6 +86,25 @@ def handle_subscription_exceptions():
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=e.message,
+                ) from e
+            except SubscriptionProviderMismatch as e:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=e.message,
+                ) from e
+            except SubscriptionTokenError as e:
+                raise HTTPException(
+                    status_code=(
+                        status.HTTP_422_UNPROCESSABLE_ENTITY
+                        if isinstance(e, SubscriptionTokenRejected)
+                        else status.HTTP_502_BAD_GATEWAY
+                    ),
+                    detail={
+                        "code": e.code,
+                        "message": e.message,
+                        "retryable": e.retryable,
+                        "next_step": e.next_step,
+                    },
                 ) from e
             except SubscriptionLoginRunnerNotConfigured as e:
                 raise HTTPException(
@@ -185,6 +211,14 @@ class VaultRouter:
             response_model=PublicSecretResponseDTO,
         )
         self.router.add_api_route(
+            "/secrets/{secret_id}/subscription-token",
+            self.set_subscription_token,
+            methods=["PUT"],
+            operation_id="set_subscription_token",
+            response_model_exclude_none=True,
+            response_model=PublicSecretResponseDTO,
+        )
+        self.router.add_api_route(
             "/secrets/{secret_id}/login-attempts",
             self.start_subscription_login,
             methods=["POST"],
@@ -204,6 +238,19 @@ class VaultRouter:
             methods=["POST"],
             operation_id="cancel_subscription_login",
             response_model=SubscriptionLoginAttemptResponse,
+        )
+        # A literal prefix with no secret id in front, because the auth middleware exempts
+        # it by path prefix: the runner reports with its shared token only.
+        self.router.add_api_route(
+            "/secrets/subscription-login/attempts/{attempt_id}/outcome",
+            self.report_subscription_login_outcome,
+            methods=["POST"],
+            operation_id="report_subscription_login_outcome",
+            status_code=status.HTTP_204_NO_CONTENT,
+            include_in_schema=False,
+            # A dependency runs before body validation, so a caller without the token gets
+            # 401 and never learns the body's shape from a 422.
+            dependencies=[Depends(assert_runner_token)],
         )
         self.router.add_api_route(
             "/secrets/{secret_id}/subscription-login",
@@ -286,7 +333,9 @@ class VaultRouter:
                 create_secret_dto=body,
                 user_id=UUID(request.state.user_id),
             )
-        except SubscriptionProviderConflict as e:
+        except (SubscriptionProviderConflict, SecretSlugConflict) as e:
+            # A taken slug is the caller's to change. Unmapped, it answered 500, which the
+            # connect sheet's create-secret drawer showed as a server failure (#6928).
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail=e.message
             ) from e
@@ -470,6 +519,24 @@ class VaultRouter:
 
     @intercept_exceptions()
     @handle_subscription_exceptions()
+    async def set_subscription_token(
+        self,
+        request: Request,
+        secret_id: UUID,
+        body: SubscriptionTokenRequest,
+    ):
+        await self._require(request, Permission.EDIT_SECRET)
+
+        secret = await self.subscription_login_service.set_subscription_token(
+            project_id=UUID(request.state.project_id),
+            secret_id=secret_id,
+            token=body.token,
+            user_id=UUID(str(request.state.user_id)),
+        )
+        return self._for_caller(request, secret)
+
+    @intercept_exceptions()
+    @handle_subscription_exceptions()
     async def start_subscription_login(self, request: Request, secret_id: UUID):
         await self._require(request, Permission.EDIT_SECRET)
 
@@ -515,6 +582,32 @@ class VaultRouter:
             user_id=UUID(str(request.state.user_id)),
         )
         return _attempt_response(view)
+
+    @intercept_exceptions()
+    @handle_subscription_exceptions()
+    async def report_subscription_login_outcome(
+        self,
+        attempt_id: str,
+        body: SubscriptionLoginOutcomeRequest,
+    ):
+        """The runner pod that ran a device login reports how it ended.
+
+        The runner token is the whole of the authorization: the runner holds no project
+        credential for a device login. The body names the row, and the service applies
+        the outcome only while that row still waits on this attempt id, which the runner
+        minted. A report for an attempt the user cancelled or replaced is a 404 and
+        changes nothing. The runner still retries a 404 within its bounded budget: a
+        report can also arrive before the start answer stored the record.
+        """
+        await self.subscription_login_service.report_attempt_outcome(
+            project_id=body.project_id,
+            secret_id=body.secret_id,
+            attempt_id=attempt_id,
+            state=body.state,
+            login=body.login,
+            error=body.error,
+        )
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @intercept_exceptions()
     @handle_subscription_exceptions()

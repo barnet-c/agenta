@@ -144,7 +144,7 @@ import {
   type ClaudeSystemPromptMeta,
 } from "./system-prompt-appendix.ts";
 import { platformGuidanceAppendix } from "./platform-guidance.ts";
-import { claudeThinkingMeta } from "./claude-thinking.ts";
+import { claudeSessionOptionsMeta } from "./claude-session-options.ts";
 import {
   describeCodexSubscriptionAuthFault,
   isSubscriptionCodexRun,
@@ -155,11 +155,10 @@ import {
   routeSessionEventToActiveTurn,
 } from "./session-events.ts";
 import { buildSandboxProvider, daytonaNetworkFields } from "./provider.ts";
-import { sandboxProviderTraits } from "../../config/runner-config.ts";
-import {
-  markSandboxDestroyed,
-  readStoredSandboxPointer,
-} from "./sandbox-reconnect.ts";
+import { sessionSandboxLabels } from "./sandbox-labels.ts";
+import { loadRunnerConfig, sandboxProviderTraits } from "../../config/runner-config.ts";
+import { readDaytonaSandboxResources } from "./daytona-provider.ts";
+import { sandboxUsageContext, startLeasedSandboxMeter } from "../../metering/sandbox-usage.ts";
 import type {
   AcquireEnvironmentResult,
   InRunnerRunFacts,
@@ -178,7 +177,11 @@ import {
   sessionContinuityStore,
 } from "./session-continuity.ts";
 import { mountExpiryMs, projectScopeFor } from "./session-identity.ts";
-import { teardownDisposition, type TeardownReason } from "./teardown.ts";
+import {
+  commandSandboxDisposition,
+  teardownDisposition,
+  type TeardownReason,
+} from "./teardown.ts";
 import {
   cleanup as cleanupWorkspace,
   materialize as materializeWorkspace,
@@ -577,6 +580,10 @@ async function acquireEnvironmentOnce(
     // SandboxLifecycle owns park-versus-delete. It returns `parked` because the mount teardown
     // below is gated on it: a parked Daytona sandbox keeps its agent mount.
     const traits = sandboxProviderTraits(plan.sandboxId);
+    // The last interval ends as the stop begins: Daytona's stop latency is not running time.
+    // Awaited after the teardown, so a slow report never delays it.
+    const meterStopped = environment.sandboxMeter?.stop();
+    environment.sandboxMeter = undefined;
     const { parked } = await teardownSandbox({
       sandbox: environment.sandbox,
       plannedSandboxId: plan.sandboxId,
@@ -584,12 +591,11 @@ async function acquireEnvironmentOnce(
       harness: plan.harness,
       reason: opts?.reason,
       log: logger,
-      // A command-only sandbox holds no harness state a failed turn could have wedged, so only an
-      // explicit kill deletes it; every other ending keeps its disk for the next turn.
       ...(plan.harnessInRunner
-        ? { disposition: opts?.reason === "kill" ? ("delete" as const) : ("stop" as const) }
+        ? { disposition: commandSandboxDisposition(opts?.reason) }
         : {}),
     });
+    await meterStopped;
     // A parked remote sandbox keeps its own mounts; runner-host mounts always come down here.
     const sandboxKeepsMounts = parked && !traits.filesOnRunner;
     // Unmount the durable cwd BEFORE removing the dir: data lives in the store, only the host
@@ -793,7 +799,13 @@ async function acquireEnvironmentOnce(
             plan.credentials.modelEnvironment,
             plan.sandboxPermission,
             plan.credentials.daytonaSecretPlan,
-            inheritedLease ? { inheritedLease } : {},
+            {
+              ...(inheritedLease ? { inheritedLease } : {}),
+              sessionLabels: sessionSandboxLabels(
+                environment.projectScopeId,
+                sessionForMount,
+              ),
+            },
           ),
           signal,
           logger,
@@ -840,6 +852,7 @@ async function acquireEnvironmentOnce(
         piModelConfig && !isPiModelRegistrationPlan(piModelConfig)
           ? { providerId: piModelConfig.providerId, keyEnv: piModelConfig.apiKeyEnv }
           : undefined;
+      const usage = sandboxUsageContext(request, sessionForMount, environment.projectScopeId);
       return {
         conversationId: sessionForMount,
         projectId: environment.projectScopeId,
@@ -869,7 +882,9 @@ async function acquireEnvironmentOnce(
         harnessEnv: env,
         extensionEnv: piExtEnv,
         modelEnvironment: plan.credentials.modelEnvironment,
+        throughGateway: plan.credentials.throughGateway,
         ...(customProvider ? { customProvider } : {}),
+        ...(usage ? { usage } : {}),
       };
     };
     // SandboxLifecycle owns the reconnect ladder, the fresh-create fallback, and both
@@ -914,6 +929,26 @@ async function acquireEnvironmentOnce(
     // Track the live handle so a shutdown signal handler can delete it if `destroy` is skipped by
     // a process KILL; removed in `destroy` on every normal exit so it is never double-deleted.
     if (environment.sandbox) inFlightSandboxes.add(environment);
+    // Sandbox seconds on the platform's Daytona account, from the moment the sandbox is up: waits,
+    // pointer reads and a failed reconnect before it are not running time.
+    // The in-process provider holds no sandbox here: it meters its own command sandbox.
+    const meteredSandboxId = (environment.sandbox as { sandboxId?: string } | undefined)?.sandboxId;
+    const meterUsage = sandboxUsageContext(request, sessionForMount, environment.projectScopeId);
+    if (
+      meteredSandboxId &&
+      meterUsage &&
+      providerTraits.commandsInRemoteSandbox &&
+      !providerTraits.harnessInRunner
+    ) {
+      const daytonaSandboxId = meteredSandboxId.replace(/^daytona\//, "");
+      environment.sandboxMeter = startLeasedSandboxMeter({
+        ...meterUsage,
+        ...(deps.startSandboxMeter ? { startMeter: deps.startSandboxMeter } : {}),
+        provider: "daytona",
+        sandboxId: daytonaSandboxId,
+        resources: () => readDaytonaSandboxResources(loadRunnerConfig().daytona, daytonaSandboxId),
+      });
+    }
 
     // CREDENTIAL PREFLIGHT (fresh Daytona sandboxes with an opaque model key and a declared
     // endpoint). Kicked off HERE, right after the sandbox exists, and awaited at the very end of
@@ -1438,16 +1473,15 @@ async function acquireEnvironmentOnce(
         : undefined;
     const claudeAppendixMeta: ClaudeSystemPromptMeta | undefined =
       claudeAppendix ? claudeSystemPromptMeta(claudeAppendix) : undefined;
-    // Claude-only: request visible ("summarized") extended-thinking display so the model's
-    // reasoning reaches the runner (and the playground). Without it, recent Claude models
-    // return signature-only thinking and no reasoning surfaces. See `claude-thinking.ts`.
-    const claudeThinking =
-      plan.acpAgent === "claude" ? claudeThinkingMeta() : undefined;
+    // Claude-only SDK options: visible ("summarized") extended thinking, the built-in tools an
+    // Agenta run turns off, and no claude.ai connectors. See `claude-session-options.ts`.
+    const claudeOptions =
+      plan.acpAgent === "claude" ? claudeSessionOptionsMeta() : undefined;
     // Disjoint `_meta` keys (`systemPrompt` vs `claudeCode`), so a shallow merge keeps both.
-    // A future second `claudeCode` producer would need a deep merge here.
+    // `claudeSessionOptionsMeta` is the one `claudeCode` producer; add new options there.
     const claudeMeta =
-      claudeAppendixMeta || claudeThinking
-        ? { ...(claudeAppendixMeta ?? {}), ...(claudeThinking ?? {}) }
+      claudeAppendixMeta || claudeOptions
+        ? { ...(claudeAppendixMeta ?? {}), ...(claudeOptions ?? {}) }
         : undefined;
     const sessionInit = {
       cwd: plan.workspace.cwd,
@@ -1658,7 +1692,11 @@ async function acquireEnvironmentOnce(
       err,
       plan.harness,
       request.modelConnection?.provider,
-      { authFault: () => describeCodexSubscriptionAuthFault(plan), unknownText: plan.unknownErrorText },
+      {
+        authFault: () => describeCodexSubscriptionAuthFault(plan),
+        modelConnection: request.modelConnection,
+        unknownText: plan.unknownErrorText,
+      },
     );
     // Same substitution as the turn path: a hosted subscription run must never be told to add a
     // vault key. Acquire itself makes no model call, but the harness starts here and a dead login

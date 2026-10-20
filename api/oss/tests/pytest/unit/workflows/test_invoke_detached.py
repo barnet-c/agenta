@@ -13,11 +13,21 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from oss.src.core.workflows import service as service_module
 from oss.src.core.workflows.service import WorkflowsService
 from oss.src.core.workflows.types import (
     WorkflowDetachedStartFailed,
     WorkflowDetachedStartNeverSent,
+    WorkflowDetachedStartRejected,
 )
+
+
+@pytest.fixture(autouse=True)
+def _services_url(monkeypatch):
+    """These tests cover transport semantics: the URLs they dial sit under the configured
+    services URL, so the real URL policy treats them as the operator's own services. The
+    policy has its own tests in ``test_service_url_policy.py``."""
+    monkeypatch.setattr(service_module.env.agenta, "services_url", "http://svc")
 
 
 class _FakeStreamResponse:
@@ -155,6 +165,29 @@ async def test_stream_service_started_rejects_failure_or_malformed_first_record(
                 run_id="run-x",
                 strict_first_record=True,
             )
+
+
+@pytest.mark.parametrize(
+    "line,rejected",
+    [
+        ('{"kind": "result", "result": {"ok": false, "error": "rejected"}}', True),
+        ('{"type": "error", "data": {"type": "error", "message": "no key"}}', True),
+        ("not-json", False),
+    ],
+)
+async def test_only_a_failure_record_is_a_rejected_start(line, rejected):
+    """A rejection proves the start never ran; a malformed record proves nothing."""
+    response = _FakeStreamResponse(lines=[line])
+    with patch("httpx.AsyncClient", return_value=_FakeAsyncClient(response)):
+        with pytest.raises(WorkflowDetachedStartFailed) as raised:
+            await _service()._stream_service_started(
+                url="http://svc/invoke",
+                credentials="Secret tok",
+                payload={},
+                run_id="run-x",
+                strict_first_record=True,
+            )
+    assert isinstance(raised.value, WorkflowDetachedStartRejected) is rejected
 
 
 async def test_stream_service_started_keeps_legacy_best_effort_for_ordinary_trigger():
@@ -491,6 +524,8 @@ async def test_a_response_that_never_reached_the_service_is_marked_never_sent(
         # 503 with that header came from the service and the status stops being proof.
         (404, {"x-ag-version": "unknown", "content-type": "application/json"}),
         (503, {"x-ag-version": "0.119.1", "x-ag-trace-id": "tr-1"}),
+        # A run that failed before any output, e.g. a model with no usable credential.
+        (422, {"x-ag-version": "0.122.8", "content-type": "application/json"}),
     ],
 )
 async def test_an_ambiguous_response_stays_an_ordinary_start_failure(
@@ -509,6 +544,10 @@ async def test_an_ambiguous_response_stays_an_ordinary_start_failure(
     # Not redundant: `WorkflowDetachedStartNeverSent` subclasses the type `pytest.raises` is
     # catching, so this is the assertion that tells the two apart.
     assert not isinstance(raised.value, WorkflowDetachedStartNeverSent)
+    # The service's own failure answer ends the run; a gateway's leaves it uncertain.
+    assert isinstance(raised.value, WorkflowDetachedStartRejected) == any(
+        name.startswith("x-ag-") for name in headers
+    )
 
 
 async def test_a_never_sent_response_is_still_an_ordinary_start_failure_to_old_handlers():
@@ -649,8 +688,8 @@ async def test_a_transport_failure_with_bytes_on_the_wire_is_not_never_sent(erro
 def _through(transport: httpx.MockTransport):
     """Build the real `httpx.AsyncClient` the code asks for, with a transport underneath.
 
-    Everything else about the client stays as production builds it, `follow_redirects=True`
-    included, so httpx's own redirect machinery runs.
+    Everything else about the client stays as production builds it, `follow_redirects=False`
+    included, so a test sees exactly the hops production would make.
     """
     real_client = httpx.AsyncClient
 
@@ -664,24 +703,20 @@ _FIRST_HOP = "http://svc/invoke"
 _SECOND_HOP = "http://redirected-elsewhere/invoke"
 
 
-async def test_a_real_redirect_to_an_unreachable_hop_is_not_never_sent():
-    """The premise the whole classification rests on, driven through httpx rather than assumed.
+async def test_a_redirect_is_not_followed():
+    """A 307 from the service ends the start; the credential never travels to the next hop.
 
-    Every other case here binds the request to the exception by hand, which is the very thing
-    under test. Here the transport raises an UNBOUND `ConnectError` and httpx attributes it, so
-    if httpx ever stopped binding the failing hop's request this test fails and the others do
-    not. A 307 keeps the method and body, which is the redirect that can carry a POST onward.
+    Following it would re-point a request that carries the run credential at a host nothing
+    checked. The redirect is a failed start, not a request to repeat.
     """
     hops = []
 
     def handle(request: httpx.Request) -> httpx.Response:
         hops.append(str(request.url))
-        if str(request.url) == _FIRST_HOP:
-            return httpx.Response(307, headers={"location": _SECOND_HOP})
-        raise httpx.ConnectError("connection refused")
+        return httpx.Response(307, headers={"location": _SECOND_HOP})
 
     with _through(httpx.MockTransport(handle)):
-        with pytest.raises(httpx.ConnectError) as raised:
+        with pytest.raises(WorkflowDetachedStartFailed):
             await _service()._stream_service_started(
                 url=_FIRST_HOP,
                 credentials="Secret tok",
@@ -689,10 +724,7 @@ async def test_a_real_redirect_to_an_unreachable_hop_is_not_never_sent():
                 run_id="run-x",
             )
 
-    assert hops == [_FIRST_HOP, _SECOND_HOP]
-    assert not isinstance(raised.value, WorkflowDetachedStartNeverSent)
-    # httpx bound the hop that failed, not the one we addressed. That is what the rule reads.
-    assert str(raised.value.request.url) == _SECOND_HOP
+    assert hops == [_FIRST_HOP]
 
 
 async def test_a_real_first_hop_refusal_is_never_sent():
@@ -709,24 +741,6 @@ async def test_a_real_first_hop_refusal_is_never_sent():
                 payload={},
                 run_id="run-x",
             )
-
-
-async def test_a_real_redirect_chain_that_exhausts_its_hops_is_not_never_sent():
-    """A redirect loop ends in `TooManyRedirects`, which is not a never-sent type."""
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(307, headers={"location": str(request.url)})
-
-    with _through(httpx.MockTransport(handle)):
-        with pytest.raises(httpx.TooManyRedirects) as raised:
-            await _service()._stream_service_started(
-                url=_FIRST_HOP,
-                credentials="Secret tok",
-                payload={},
-                run_id="run-x",
-            )
-
-    assert not isinstance(raised.value, WorkflowDetachedStartNeverSent)
 
 
 async def test_a_read_failure_part_way_through_the_stream_is_not_never_sent():

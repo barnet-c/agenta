@@ -26,7 +26,10 @@ import {
 // a prior turn to rebuild, so this suite answers with `priorRecords.rows` instead.
 const priorRecords = vi.hoisted(() => ({ rows: [] as unknown[] }));
 vi.mock("../../src/sessions/records-query.ts", () => ({
-  fetchSessionRecords: async () => priorRecords.rows,
+  fetchSessionRecords: async () => ({
+    records: priorRecords.rows,
+    recordsIncomplete: false,
+  }),
 }));
 
 /** TTFB is the shortest window, so a silent harness trips it first. */
@@ -162,7 +165,7 @@ describe("an approval reply that stalls", () => {
     );
 
     assert.equal(result.ok, false);
-    assert.match(result.error ?? "", /no first response/);
+    assert.match(result.error ?? "", /did not start responding within/);
     assert.equal(result.stalledBeforeFirstResponse, undefined);
   });
 });
@@ -182,7 +185,7 @@ describe("a non-streaming turn", () => {
     );
 
     assert.equal(result.ok, false);
-    assert.match(result.error ?? "", /idle timeout/);
+    assert.match(result.error ?? "", /made no progress for/);
     assert.equal(result.stalledBeforeFirstResponse, undefined);
   });
 

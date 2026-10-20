@@ -295,11 +295,9 @@ CELLS = {
         "provider": "openai",
     },
     # X2: the CODEX harness on DAYTONA with a managed vault key. Daytona rejects subscription
-    # auth by design, so managed is the only codex cell a cloud sandbox can have. It exists
-    # because the continuity tiers mean DIFFERENT things per sandbox: a cold-2 resume (runner
-    # replica replaced) can only COMPLETE on a remote sandbox — on local it correctly refuses,
-    # since a local sandbox lives inside the runner process. Without a codex-on-daytona cell the
-    # gate can never observe a completed codex cold 2. Verified out of band during the v0.108.0
+    # auth by design, so managed is the only codex cell a cloud sandbox can have. It is the only
+    # codex cell on a remote sandbox, so the continuity tiers (`park`, `cold2`) see codex rebuild
+    # a Daytona session as well as a local one. Verified out of band during the v0.108.0
     # release run (a one-off staging probe); promoted into the gate here.
     "X2": {
         "harness": "codex",
@@ -1194,14 +1192,13 @@ def j4_deny(cell: dict) -> dict:
 REQUIRE_STORE = False
 STORE_SETTLE_SECONDS = 45.0
 COLD2_REPLACE_CMD: str | None = None
-OWNER_TTL_SECONDS = 120.0
 # A hung operator hook must not hang the whole gate run.
 COLD2_REPLACE_TIMEOUT_SECONDS = 180.0
-# The owner key lapses AT the TTL, and the replacement replica may still be coming up, so a
-# resume timed exactly on the boundary races both and fails for an unrelated, misleading reason.
-# The approval-matrix driver waits for container health plus the same margin
+# The replacement replica may still be coming up when the hook returns, so a resume sent at once
+# races its startup and fails for an unrelated, misleading reason. The approval-matrix driver
+# waits for container health plus the same margin
 # (docs/design/codex-harness/spike/scripts/codex-approval-matrix-qa.py).
-OWNER_TTL_MARGIN_SECONDS = 20.0
+COLD2_SETTLE_SECONDS = 20.0
 
 # How long the `park` tier idles so the session pool expires the session on its own. The runner
 # parks a Daytona session at `AGENTA_RUNNER_DAYTONA_SESSION_IDLE_TTL_MS` (120s by default), and an
@@ -1209,13 +1206,6 @@ OWNER_TTL_MARGIN_SECONDS = 20.0
 # reconnect. Override with --park-wait when a deployment runs a different TTL.
 PARK_IDLE_TTL_SECONDS = 120.0
 PARK_MARGIN_SECONDS = 45.0
-
-# The runner's refusal when a replacement replica tries to adopt a local-sandbox session
-# (`LocalSandboxNotOwnerError`, session-continuity.ts). Asserted by the cold2 journey and quoted
-# in coverage.md — one spelling, one source, so the doc and the assertion cannot drift apart.
-# Full text: "local sandbox requires a single runner: replica '<a>' is not the owner of session
-# '<b>' (owned by '<c>'). Refusing to cold-start on the wrong host."
-LOCAL_NOT_OWNER_MARKER = "is not the owner of session"
 
 CWD_PROBE_FILE = "qa-cwd.txt"
 STORE_PROBE_FILE = "qa-store.txt"
@@ -1530,14 +1520,11 @@ def _continuity(cell: dict, tier: str) -> dict:
                 "pass": False,
                 "why": f"cold 2: the replica-replacement command failed ({proc.returncode}): {proc.stderr[:200]}",
             }
-        # Wait out the session-owner key. The killed replica never released `owner:session:<id>`
-        # and `claim_owner` never steals from an owner that still looks live, so a resume inside
-        # the window fails for the wrong reason (issue #5611's misleading MCP-shim error). The
-        # margin matters as much as the TTL: the key lapses AT the boundary, so a resume timed
-        # exactly on it races the lapse and the replacement replica's own startup.
-        wait = OWNER_TTL_SECONDS + OWNER_TTL_MARGIN_SECONDS
+        # No lease to wait out: the next turn has a new turn id, so the API binds it to the
+        # replacement replica on its first beat. Only the replacement's own startup is waited.
+        wait = COLD2_SETTLE_SECONDS
         time.sleep(wait)
-        transition = f"replica replaced via the operator hook, then {int(wait)}s of owner-TTL wait"
+        transition = f"replica replaced via the operator hook, then {int(wait)}s for it to settle"
     else:  # pragma: no cover - guarded by the JOURNEYS table
         raise ValueError(f"unknown continuity tier {tier}")
 
@@ -1575,43 +1562,10 @@ def _continuity(cell: dict, tier: str) -> dict:
         }[tier],
     }
 
-    if tier == "cold2" and cell["sandbox"] == "local":
-        # This journey used to demand the ownership guard REFUSE here, citing warm-approvals-qa.md.
-        # That expectation cannot hold alongside the transition this journey performs, and the two
-        # halves contradict each other:
-        #
-        #   `isLocalRunnerEligible` (session-continuity.ts) allows the run when the owner is
-        #   unknown OR is this replica. The transition above deliberately waits out the owner key
-        #   so the resume does not fail on a stale owner. Once it lapses, `claim_owner` hands
-        #   ownership to whoever asks next — the replacement replica — so the guard sees itself as
-        #   the owner and correctly does not refuse.
-        #
-        # Refusing is right when the ORIGINAL owner is still ALIVE, which is a different scenario
-        # this journey never creates: it needs two replicas running at once, and the gate drives
-        # one deployment over HTTP. The pure function is covered by the runner's own
-        # session-ownership tests; an end-to-end two-replica journey is a follow-up.
-        #
-        # What IS correct after a genuine replica loss is what the remote tiers assert: the dead
-        # replica took its local sandbox with it, and the replacement rebuilds the conversation
-        # from the durable working directory in the object store. So local cold 2 now asserts the
-        # same resume as remote, plus one extra guard below — a refusal here means the owner key
-        # outlived the wait, which measures the wait rather than the product.
-        refused = any(LOCAL_NOT_OWNER_MARKER in str(e) for e in t_last.errors)
-        if refused:
-            return {
-                "pass": False,
-                "why": (
-                    "cold 2 refused with "
-                    f'"{LOCAL_NOT_OWNER_MARKER}" even though the journey waited out the owner key '
-                    f"({OWNER_TTL_SECONDS:.0f}s + {OWNER_TTL_MARGIN_SECONDS:.0f}s margin). The "
-                    "dead replica's ownership outlived the wait, so this run measured the wait, "
-                    "not the product. Raise --owner-ttl to the deployment's real session-owner "
-                    "TTL and run it again."
-                ),
-                "evidence": evidence,
-                "turn_resumed": t_last.summary(),
-            }
-
+    # Local cold 2 asserts the same resume as remote. The dead replica took its local sandbox
+    # with it, and the replacement rebuilds the conversation from the durable working directory
+    # in the object store. The runner has no runtime refusal for a local session on another
+    # replica: the chart keeps the local provider at one runner instead.
     reply = t_last.reply
     cwd_back = token in reply
     store_back = store_token in reply if tier != "warm" else None
@@ -1971,8 +1925,8 @@ def j6_park(cell: dict) -> dict:
 
 
 def j6_cold2(cell: dict) -> dict:
-    """Cold 2: the runner replica is replaced. Needs an operator hook (SIGKILL), and the expected
-    result differs per sandbox: a local sandbox correctly REFUSES, a remote one resumes cold."""
+    """Cold 2: the runner replica is replaced. Needs an operator hook (SIGKILL). On a local and a
+    remote sandbox alike, the replacement rebuilds the session cold and the resume completes."""
     return _continuity(cell, "cold2")
 
 
@@ -2204,18 +2158,20 @@ def j5_commit(cell: dict) -> dict:
 
 # The wire name of an MCP-delivered tool is `mcp__<server>__<tool>` (verified on DeepWiki:
 # `mcp__deepwiki__read_wiki_structure`). The harness built-ins are always active, so the agent has
-# other tools available and the assertion is keyed on the `mcp__` prefix.
-MCP_TOOL_RE = re.compile(r"^mcp__")
+# other tools available and the assertion is keyed on the `mcp__` prefix. The codex harness names
+# the same tools `mcp.<server>.<tool>` (for example `mcp.deepwiki.read_wiki_structure`), so that
+# prefix counts too.
+MCP_TOOL_RE = re.compile(r"^(mcp__|mcp\.)")
 
 
 def j7_mcp(cell: dict) -> dict:
     """J7: an MCP server declared in the agent config is delivered to the harness, and one of its
     tools actually executes — proven by a `tool-output-available` frame for an `mcp__*` tool.
 
-    Two hard constraints (both verified in the runner):
-    - **Claude only.** Pi refuses any run that declares `mcps`
-      (`run-plan.ts` PI_USER_MCP_UNSUPPORTED_MESSAGE); user MCP needs a harness with mcpTools
-      (Claude). So this journey SKIPS on non-Claude cells.
+    Runs on Claude and Pi cells. Pi calls gateway MCP tools through its own client
+    (`services/runner/src/extensions/pi-mcp.ts`), and its tool names also start with `mcp__`.
+
+    One hard constraint (verified in the runner):
     - **Public HTTPS only.** The SDK resolver and the runner both run an SSRF guard that rejects
       http:// and private/loopback/metadata hosts, so a local MCP server is unreachable from the
       deployment. --mcp-url must be a public HTTPS Streamable-HTTP endpoint (default: DeepWiki).
@@ -2227,12 +2183,6 @@ def j7_mcp(cell: dict) -> dict:
     `/gateways/mcps/custom/<name>`. So the gateway, not the harness, dials the URL, and it must be
     reachable from the API container.
     """
-    if cell["harness"] != "claude":
-        return {
-            "skip": True,
-            "why": f"MCP requires a Claude harness; Pi rejects any run with mcps (cell harness={cell['harness']}). Run with --cell C1.",
-        }
-
     slug = f"qa-gate-mcp-{uuid.uuid4().hex[:8]}"
     created = api_call(
         "POST",
@@ -2296,13 +2246,13 @@ def _j7_mcp_turn(cell: dict, slug: str) -> dict:
     )
     if not mcp_calls and not mcp_ran:
         why = (
-            f"no mcp__* tool call was made against {MCP_URL} — the harness may not have reached "
+            f"no mcp__* or mcp.* tool call was made against {MCP_URL} — the harness may not have reached "
             "the server, or the server exposed no tools. Check the runner log for MCP errors."
         )
     elif t.errors:
-        why = f"an mcp__* tool executed against {MCP_URL} but the turn carried wire errors: {t.errors}"
+        why = f"an MCP tool executed against {MCP_URL} but the turn carried wire errors: {t.errors}"
     else:
-        why = f"an mcp__* tool executed against {MCP_URL} (wire shows tool-output-available, no wire errors)"
+        why = f"an MCP tool executed against {MCP_URL} (wire shows tool-output-available, no wire errors)"
     return {
         "pass": mcp_ran,
         "why": why,
@@ -2342,7 +2292,14 @@ GREP_TOOL_NAMES = {"grep"}
 DAYTONA_PLACEHOLDER_PREFIX = "dtn_secret_"
 # Prefixes real provider keys start with. Seeing one of these is positive proof that hiding did
 # not happen, as opposed to merely failing to see the placeholder.
-REAL_KEY_PREFIXES = ("sk-", "sk_")
+REAL_KEY_PREFIXES = ("sk-", "sk_", "AIza")
+# The fixed value the runner puts in the provider variable when the model call goes through the
+# LLM gateway (`GATEWAY_PLACEHOLDER_API_KEY` in services/runner/src/extensions/
+# model-provider-override.ts). It selects the gateway route; the gateway adds the real key.
+GATEWAY_PLACEHOLDER_KEY = "agenta-gateway"
+# An environment line whose value starts like a real provider key (OpenAI, Anthropic,
+# OpenRouter and other `sk-` keys, Google `AIza` keys). Used by `grep -c -E` in the sandbox.
+REAL_KEY_ENV_PATTERN = "=(sk-|sk_|AIza)"
 
 
 def _provider_key_var(cell: dict) -> str:
@@ -2480,7 +2437,13 @@ def j_rule_case(cell: dict) -> dict:
 
 
 def j_secret_opaque(cell: dict) -> dict:
-    """The provider key reaches a Daytona sandbox as a placeholder, never in the clear.
+    """No real provider key reaches a Daytona sandbox.
+
+    Three designs are safe, and the sandbox reports which one it sees: a Daytona Secret
+    placeholder in the provider variable, the gateway selector `agenta-gateway` there (the LLM
+    gateway adds the real key), or, for Pi, no variable at all (Pi chosen on Daytona runs in the
+    runner, and only its tool calls run in the sandbox). The sandbox also counts environment
+    values of any name that start like a real key; that count must be zero.
 
     Daytona only. On the local sandbox the harness runs inside the runner container, so its keys
     never leave the deployment and there is nothing to hide them from; the journey SKIPs there
@@ -2527,16 +2490,22 @@ def j_secret_opaque(cell: dict) -> dict:
 
     var = _provider_key_var(cell)
     nonce = uuid.uuid4().hex[:10].upper()
-    hidden_word, plain_word, empty_word = (
+    hidden_word, gateway_word, plain_word, empty_word = (
         f"HIDDEN-{nonce}",
+        f"GATEWAY-{nonce}",
         f"PLAIN-{nonce}",
         f"EMPTY-{nonce}",
     )
+    leaks_word = f"LEAKS-{nonce}-"
     # POSIX `case`, so it behaves the same under every harness's shell. The classification
-    # happens INSIDE the sandbox; only the verdict word crosses back.
+    # happens INSIDE the sandbox; only the verdict words and a count cross back. The second
+    # command counts environment values of ANY name that start like a real provider key, so a
+    # key that reached the sandbox under another variable still fails the journey.
     probe = (
         f'case "${var}" in {DAYTONA_PLACEHOLDER_PREFIX}*) echo {hidden_word} ;; '
-        f'"") echo {empty_word} ;; *) echo {plain_word} ;; esac'
+        f"{GATEWAY_PLACEHOLDER_KEY}) echo {gateway_word} ;; "
+        f'"") echo {empty_word} ;; *) echo {plain_word} ;; esac; '
+        f"echo {leaks_word}$(env | grep -c -E '{REAL_KEY_ENV_PATTERN}')"
     )
 
     s = str(uuid.uuid4())
@@ -2558,15 +2527,41 @@ def j_secret_opaque(cell: dict) -> dict:
     )
 
     reply = t.reply or ""
-    saw_hidden = hidden_word in reply
-    saw_plain = plain_word in reply
-    saw_empty = empty_word in reply
+    bash_call, outcome = _bash_call_outcome(t)
+    # Every verdict word is in the prompt, so the reply alone does not prove the command ran.
+    # Read the verdict from the shell call's own output whenever the wire shows that call. Codex
+    # runs shell through native exec frames this driver cannot see, so the reply stays the
+    # source there.
+    if bash_call is not None:
+        payload = t.tool_payloads.get(bash_call["toolCallId"], {})
+        evidence = str(payload.get("output") or "") if outcome == "available" else ""
+    elif cell["harness"] == "codex":
+        evidence = reply
+    else:
+        evidence = ""
+    saw_hidden = hidden_word in evidence
+    saw_gateway = gateway_word in evidence
+    saw_plain = plain_word in evidence
+    saw_empty = empty_word in evidence
+    leak_count_match = re.search(re.escape(leaks_word) + r"(\d+)", evidence)
+    leak_count = int(leak_count_match.group(1)) if leak_count_match else None
     # Belt and braces: the probe cannot emit key material, but a model that ignored it and ran
-    # something else might. Treat any real-key prefix in the reply as a loud failure.
-    leaked = next((p for p in REAL_KEY_PREFIXES if p in reply), None)
-    _, outcome = _bash_call_outcome(t)
+    # something else might. Treat any real-key prefix in the reply or the output as a loud
+    # failure.
+    leaked = next((p for p in REAL_KEY_PREFIXES if p in reply or p in evidence), None)
+    # Pi chosen on Daytona runs in the runner (`inprocess`), and only its tool calls run in the
+    # sandbox, so the sandbox holds no provider key at all. Claude Code runs inside the sandbox
+    # and needs its variable, so an empty one there is a delivery failure.
+    harness_outside = cell["harness"].startswith("pi")
+    safe_verdict = saw_hidden or saw_gateway or (saw_empty and harness_outside)
 
-    ok = saw_hidden and not saw_plain and leaked is None and not t.errors
+    ok = (
+        safe_verdict
+        and not saw_plain
+        and leak_count == 0
+        and leaked is None
+        and not t.errors
+    )
     if leaked:
         why = (
             f"the reply carries what looks like a real key (prefix '{leaked}'). Whatever ran, "
@@ -2574,26 +2569,50 @@ def j_secret_opaque(cell: dict) -> dict:
         )
     elif saw_plain:
         why = (
-            f"{var} reached the sandbox in the CLEAR: the sandbox classified it as not starting "
-            f"'{DAYTONA_PLACEHOLDER_PREFIX}'. Credential hiding is not in effect on this "
+            f"{var} reached the sandbox in the CLEAR: the sandbox classified it as neither a "
+            f"'{DAYTONA_PLACEHOLDER_PREFIX}' placeholder nor the gateway selector "
+            f"'{GATEWAY_PLACEHOLDER_KEY}'. Credential hiding is not in effect on this "
             "deployment. Check that the runner's Daytona API key may manage Secrets and that "
             "AGENTA_RUNNER_DAYTONA_OPAQUE_SECRETS is not set to an off value."
         )
-    elif saw_empty:
+    elif leak_count is None:
         why = (
-            f"{var} is not set inside the sandbox at all. The agent cannot be reaching the "
-            "provider with it, so this is a delivery failure rather than proof of hiding."
+            f"the sandbox never reported a verdict in the shell call's own output (bash "
+            f"outcome={outcome}). The journey proves nothing unless the command actually ran, so "
+            "this is a FAIL rather than a pass on absence."
         )
-    elif not saw_hidden:
+    elif leak_count:
+        why = (
+            f"{leak_count} environment value(s) in the sandbox start like a real provider key. "
+            "A key reached the sandbox under some variable."
+        )
+    elif saw_empty and not harness_outside:
+        why = (
+            f"{var} is not set inside the sandbox at all, and harness={cell['harness']} runs "
+            "there. The agent cannot be reaching the provider with it, so this is a delivery "
+            "failure rather than proof of hiding."
+        )
+    elif not safe_verdict:
         why = (
             f"the sandbox never reported a verdict for {var} (bash outcome={outcome}). The "
             "journey proves nothing unless the command actually ran, so this is a FAIL rather "
             "than a pass on absence."
         )
-    else:
+    elif saw_hidden:
         why = (
             f"{var} in the sandbox begins '{DAYTONA_PLACEHOLDER_PREFIX}', so the agent holds a "
-            "Daytona Secret placeholder and not the real key"
+            "Daytona Secret placeholder and not the real key; no other value looks like a key"
+        )
+    elif saw_gateway:
+        why = (
+            f"{var} in the sandbox is the gateway selector '{GATEWAY_PLACEHOLDER_KEY}': the "
+            "model call goes through the LLM gateway, which adds the real key; no value in the "
+            "sandbox looks like a key"
+        )
+    else:
+        why = (
+            f"{var} is not set in the sandbox: harness={cell['harness']} runs in the runner "
+            "and only its tool calls run in the sandbox; no value in the sandbox looks like a key"
         )
 
     return {
@@ -2601,9 +2620,12 @@ def j_secret_opaque(cell: dict) -> dict:
         "why": why,
         "variable": var,
         "bash_outcome": outcome,
+        "leak_count": leak_count,
         "verdict": (
             "hidden"
             if saw_hidden
+            else "gateway"
+            if saw_gateway
             else "plaintext"
             if saw_plain
             else "unset"
@@ -3179,11 +3201,15 @@ CREDENTIAL_DELIVERY_CODE = "credential_delivery_failed"
 # The sandbox provider ran out of room. This is the environment refusing to give the journey what
 # it asked for, not the product failing, so it is a SKIP with a loud reason rather than a FAIL.
 #
-# The match is deliberately narrow and quotes Daytona's own create-path refusal. It must NEVER
-# grow to cover `rate_limited`: an internal rate limit under a load the product is supposed to
-# support is a real finding, and hiding it behind a SKIP would delete the only signal the gate has.
+# The match is deliberately narrow and quotes Daytona's own create-path refusal, plus the sentence
+# the runner puts in its place (code `sandbox_capacity`) once the provider refused twice. It must
+# NEVER grow to cover `rate_limited`, nor the runner's own sandbox-slot limit, which shares the
+# `sandbox_capacity` code: an internal limit under a load the product is supposed to support is a
+# real finding, and hiding it behind a SKIP would delete the only signal the gate has.
 CAPACITY_REFUSAL_RE = re.compile(
-    r"total disk limit exceeded|disk quota exceeded|sandbox quota exceeded", re.I
+    r"total disk limit exceeded|disk quota exceeded|sandbox quota exceeded"
+    r"|sandbox provider is at its capacity limit",
+    re.I,
 )
 
 
@@ -3950,15 +3976,6 @@ def main() -> int:
         ),
     )
     p.add_argument(
-        "--owner-ttl",
-        type=float,
-        default=120.0,
-        help=(
-            "seconds to wait after replacing the replica, so the dead replica's session-owner key "
-            "lapses (AGENTA_SESSIONS_REDIS_OWNER_TTL_SECONDS, default 120)"
-        ),
-    )
-    p.add_argument(
         "--subscription-slug",
         default=SUBSCRIPTION_SLUG,
         help=(
@@ -4120,7 +4137,7 @@ def main() -> int:
 
     resolve_credentials(args.env_file)
 
-    global REQUIRE_STORE, STORE_SETTLE_SECONDS, COLD2_REPLACE_CMD, OWNER_TTL_SECONDS
+    global REQUIRE_STORE, STORE_SETTLE_SECONDS, COLD2_REPLACE_CMD
     global PARK_IDLE_TTL_SECONDS, PARK_MARGIN_SECONDS
     # A count of zero would make a concurrency journey pass on nothing, which is the one result
     # this class of check must never produce. Stop before spending a single run. The two
@@ -4164,7 +4181,6 @@ def main() -> int:
     REQUIRE_STORE = args.require_store
     STORE_SETTLE_SECONDS = args.store_settle
     COLD2_REPLACE_CMD = args.cold2_replace_cmd
-    OWNER_TTL_SECONDS = args.owner_ttl
     if args.park_wait is not None:
         # One flag, one knob: the caller states the total idle, so the margin is already in it.
         PARK_IDLE_TTL_SECONDS = args.park_wait

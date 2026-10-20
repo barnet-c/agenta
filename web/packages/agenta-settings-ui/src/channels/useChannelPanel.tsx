@@ -1,7 +1,7 @@
 import {useCallback, useRef, useState} from "react"
 
 import {Select, SelectContent, SelectItem, SelectTrigger, SelectValue} from "@agenta/ui/ui"
-import {Broadcast, Code} from "@phosphor-icons/react"
+import {Broadcast, ChatCircleText, Code} from "@phosphor-icons/react"
 
 import {ChannelAgentPicker} from "./ChannelAgentPicker"
 import {ChannelConnectFlow} from "./ChannelConnectFlow"
@@ -56,8 +56,10 @@ export type ChannelsRoute =
       }
     | {view: "manage"; platform: ChannelPlatform; connectionId: string | null}
     | {view: "api"}
-    /** Choose the agent a new connection answers as; needs `agents`. */
-    | {view: "agents"}
+    /** The agent's embeds, or one of them. */
+    | {view: "embed"; connectionId: string | null}
+    /** Choose the agent a new connection answers as; needs `agents`. Then `platform`, if given. */
+    | {view: "agents"; platform?: ChannelPlatform}
 
 export interface UseChannelPanelOptions {
     /** The agent whose page this is; decides "connected here" versus "connected to X". */
@@ -76,10 +78,20 @@ export interface UseChannelPanelOptions {
     hostedHandle?: string
     /** The API view's content; the hub lists API only when it is given. */
     api?: React.ReactNode
+    /** The embed views' content; the hub lists Embed only when it is given. */
+    embed?: (view: EmbedViewProps) => React.ReactNode
     /** Agents to switch between from the header; the header shows the agent's name without it. */
     agents?: ChannelsPanelAgent[]
     /** Switch the panel to another agent; it reopens on that agent's hub. */
     onAgentChange?: (agentId: string) => void
+}
+
+export interface EmbedViewProps {
+    /** The embed to edit; null lists the agent's embeds. */
+    connectionId: string | null
+    onOpen: (connectionId: string) => void
+    /** Steps back from an embed, e.g. after archiving it. */
+    onBack: () => void
 }
 
 const knownIds = (connections: ChannelConnections, platform: ChannelPlatform): string[] =>
@@ -103,6 +115,8 @@ const routeKey = (route: ChannelsRoute, depth: number): string => {
             return `${depth}:connect:${route.platform}:${route.mode}`
         case "manage":
             return `${depth}:manage:${route.platform}:${route.connectionId ?? ""}`
+        case "embed":
+            return `${depth}:embed:${route.connectionId ?? ""}`
         default:
             return `${depth}:${route.view}`
     }
@@ -135,6 +149,7 @@ export const useChannelPanel = ({
     renderPanel,
     hostedHandle = "@agenta",
     api,
+    embed,
     agents,
     onAgentChange,
 }: UseChannelPanelOptions) => {
@@ -211,15 +226,18 @@ export const useChannelPanel = ({
         [openRoute, entryRoute],
     )
 
-    /** Opens on one connection's manage view, over the hub. A pending link opens on the hub:
-     * resuming it mints a new link, which only an explicit Connect should do. */
+    /** Opens on one connection's manage view, over the hub; a pending link opens on its linking step. */
     const openConnection = useCallback(
         (connection: ChannelConnection) => {
             const {platform, connectionId = null} = connection
-            if (connection.status === "pending") openRoute({view: "hub"})
+            if (connection.status === "pending")
+                openRoute(
+                    {view: "hub"},
+                    connectRoute(platform, connection.kind, connectionId ?? undefined),
+                )
             else openRoute({view: "hub"}, {view: "manage", platform, connectionId})
         },
-        [openRoute],
+        [openRoute, connectRoute],
     )
 
     const onConnected = async (route: Extract<ChannelsRoute, {view: "connect"}>) => {
@@ -291,6 +309,8 @@ export const useChannelPanel = ({
                         }
                         onAdd={(platform) => push(connectRoute(platform))}
                         onOpenApi={() => push({view: "api"})}
+                        showEmbed={!!embed}
+                        onOpenEmbed={() => push({view: "embed", connectionId: null})}
                     />
                 )
             case "platform":
@@ -368,6 +388,14 @@ export const useChannelPanel = ({
             }
             case "api":
                 return api ?? null
+            case "embed":
+                return (
+                    embed?.({
+                        connectionId: route.connectionId,
+                        onOpen: (connectionId) => push({view: "embed", connectionId}),
+                        onBack: back,
+                    }) ?? null
+                )
             case "agents":
                 return (
                     <ChannelAgentPicker
@@ -375,7 +403,11 @@ export const useChannelPanel = ({
                         connections={connections}
                         onSelect={(id) => {
                             onAgentChange?.(id)
-                            push({view: "hub"})
+                            push(
+                                route.platform
+                                    ? {view: "platform", platform: route.platform}
+                                    : {view: "hub"},
+                            )
                         }}
                     />
                 )
@@ -388,6 +420,8 @@ export const useChannelPanel = ({
                 return {title: "Publish", icon: <Broadcast size={18} />}
             case "api":
                 return {title: "API", icon: <Code size={18} weight="bold" />}
+            case "embed":
+                return {title: "Embed", icon: <ChatCircleText size={18} />}
             case "agents":
                 return {title: "Connect a channel", icon: <Broadcast size={18} />}
             case "connect": {

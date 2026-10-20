@@ -1,23 +1,31 @@
 """Protocol-shaped LLM gateway proxy responses."""
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List
+import json
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, Optional
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from oss.src.utils.logging import get_module_logger
+from oss.src.apis.fastapi.gateways.exceptions import log_plane_disabled
 from oss.src.apis.fastapi.gateways.llms.utils import (
     LLMRequestBodyError,
     parse_llm_call_context,
     parse_messages_call_context,
     parse_responses_call_context,
 )
-from oss.src.apis.fastapi.gateways.utils import response_headers, with_code_marker
+from oss.src.apis.fastapi.gateways.flags import llm_gateway_serves_caller
+from oss.src.apis.fastapi.gateways.utils import response_headers
 from oss.src.core.gateways.dtos import (
     GatewayEndpointNamespace,
     forwardable_request_headers,
+    with_code_marker,
 )
+from oss.src.core.gateways.cleanup import run_shielded
+from oss.src.core.gateways.egress import classify_transport_error
 from oss.src.core.gateways.llms.dtos import LLMCallContext, LLMProtocol
+from oss.src.core.gateways.llms.errors import UPSTREAM_ERROR, connection_lost_message
 from oss.src.core.gateways.types import (
     GatewayEndpointInactiveError,
     GatewayPlaneDisabledError,
@@ -29,7 +37,9 @@ from oss.src.core.gateways.llms.types import (
     LLMModelIdentifierInvalidError,
     LLMModelNotAllowedError,
     LLMRoutingFieldNotAllowedError,
+    LLMCapabilityNotAllowedError,
     LLMUpstreamError,
+    LLMUpstreamTimeoutError,
 )
 from oss.src.core.gateways.policy.types import (
     CeilingExceededError,
@@ -37,9 +47,10 @@ from oss.src.core.gateways.policy.types import (
     SecretNotFoundError,
     EntitlementDeniedError,
     PolicyDeniedError,
+    SpendRefusedError,
 )
+from oss.src.core.gateways.run_claims import gateway_run_id, gateway_run_labels
 from oss.src.utils.context import get_auth_scope
-from oss.src.utils.env import env
 
 if TYPE_CHECKING:
     from oss.src.core.gateways.llms.service import LLMGatewayService
@@ -58,6 +69,7 @@ _DOMAIN_EXCEPTIONS = (
     EntitlementDeniedError,
     LLMModelNotAllowedError,
     LLMRoutingFieldNotAllowedError,
+    LLMCapabilityNotAllowedError,
     LLMModelIdentifierInvalidError,
     CeilingExceededError,
     SecretNotFoundError,
@@ -77,12 +89,21 @@ def _openai_error(
     error_type: str,
     code: str,
     marked: bool = True,
+    headers: Optional[Dict[str, str]] = None,
     **extra: Any,
 ) -> JSONResponse:
     rendered = with_code_marker(message, code) if marked else message
     error: Dict[str, Any] = {"message": rendered, "type": error_type, "code": code}
     error.update(extra)
-    return JSONResponse(status_code=status_code, content={"error": error})
+    return JSONResponse(
+        status_code=status_code, content={"error": error}, headers=headers
+    )
+
+
+# A missing or unusable secret is not transient. Its 409 is a status the Anthropic and OpenAI
+# SDKs retry by default, so Claude Code retried one for four minutes and the person saw only
+# "no first response"; both SDKs read this header before the status.
+_NOT_RETRYABLE = {"x-should-retry": "false"}
 
 
 def _request_body_detail(exc: ValueError) -> str:
@@ -108,10 +129,20 @@ def _request_body_detail(exc: ValueError) -> str:
 def _map_domain_exception(exc: Exception) -> JSONResponse:
     """Map gateway failures to OpenAI-compatible error responses."""
     if isinstance(exc, GatewayPlaneDisabledError):
+        log_plane_disabled(exc)
         return _openai_error(
             status_code=403,
             message=exc.message,
             error_type="invalid_request_error",
+            code=exc.code,
+        )
+    if isinstance(exc, SpendRefusedError):
+        # Its own code, so the runner and the chat can name the refusal (out of credit,
+        # built-in models not enabled) instead of showing a generic denial.
+        return _openai_error(
+            status_code=403,
+            message=exc.message,
+            error_type="permission_error",
             code=exc.code,
         )
     if isinstance(exc, (PolicyDeniedError, EntitlementDeniedError)):
@@ -146,6 +177,14 @@ def _map_domain_exception(exc: Exception) -> JSONResponse:
             code="routing_field_not_allowed",
             field=exc.field,
         )
+    if isinstance(exc, LLMCapabilityNotAllowedError):
+        return _openai_error(
+            status_code=400,
+            message=exc.message,
+            error_type="invalid_request_error",
+            code="capability_not_allowed",
+            field=exc.field,
+        )
     if isinstance(exc, LLMModelIdentifierInvalidError):
         return _openai_error(
             status_code=400,
@@ -169,6 +208,7 @@ def _map_domain_exception(exc: Exception) -> JSONResponse:
             message=exc.message,
             error_type="invalid_request_error",
             code="secret_missing",
+            headers=_NOT_RETRYABLE,
         )
     if isinstance(exc, SecretInvalidError):
         return _openai_error(
@@ -176,6 +216,7 @@ def _map_domain_exception(exc: Exception) -> JSONResponse:
             message=exc.message,
             error_type="invalid_request_error",
             code="secret_invalid",
+            headers=_NOT_RETRYABLE,
         )
     if isinstance(exc, LLMAdapterNotFoundError):
         return _openai_error(
@@ -191,6 +232,16 @@ def _map_domain_exception(exc: Exception) -> JSONResponse:
             error_type="invalid_request_error",
             code="endpoint_not_found",
         )
+    if isinstance(exc, LLMUpstreamTimeoutError):
+        # 408, as LiteLLM answers its own timeout: the gateway gave up waiting, which is
+        # not the same as a provider answering 504.
+        return _openai_error(
+            status_code=408,
+            message="The model provider did not answer in time.",
+            error_type="api_error",
+            code="upstream_timeout",
+            marked=False,
+        )
     # This is a transport/adapter failure, not an upstream protocol response (those
     # are relayed as LLMRelayResult without reaching this mapper). Do not expose
     # adapter or provider exception text to the caller.
@@ -202,6 +253,84 @@ def _map_domain_exception(exc: Exception) -> JSONResponse:
         code="upstream_error",
         marked=False,
     )
+
+
+def _stream_error_frame(protocol: LLMProtocol, exc: Exception) -> bytes:
+    """The terminal SSE event that tells a streaming caller its answer is cut short.
+
+    A safety net for what the relay's own error handling (`relay_upstream_errors`) does not
+    turn into an event: a credential echo, a timeout, a route that bypasses the relay. The
+    shape and the marked sentence are the relay's, so the caller's SDK raises it and the
+    runner reads it like any other upstream error. It opens with a blank line: a route that
+    bypasses the relay may have stopped mid-line, and the event must not join that line.
+    """
+    if isinstance(exc, LLMUpstreamTimeoutError):
+        code = "upstream_timeout"
+        message = with_code_marker(
+            "The model provider did not answer in time.", UPSTREAM_ERROR
+        )
+    else:
+        code = UPSTREAM_ERROR
+        message = connection_lost_message()
+
+    if protocol == LLMProtocol.MESSAGES:
+        event = b"error"
+        data = {"type": "error", "error": {"type": "api_error", "message": message}}
+    elif protocol == LLMProtocol.RESPONSES:
+        event = b"error"
+        data = {"type": "error", "code": code, "message": message, "param": None}
+    else:
+        event = None
+        data = {"error": {"message": message, "type": "api_error", "code": code}}
+
+    frame = b"\n\n"
+    if event is not None:
+        frame += b"event: " + event + b"\n"
+    # Unescaped, as the relay writes it, so a harness that keeps the raw text reads the marker.
+    return frame + b"data: " + json.dumps(data, ensure_ascii=False).encode() + b"\n\n"
+
+
+async def _stream_with_terminal_error(
+    body: AsyncIterator[bytes], *, protocol: LLMProtocol
+) -> AsyncIterator[bytes]:
+    """Relay `body`, and end the stream cleanly if it fails after the headers were sent.
+
+    The status line is already on the wire, so an error can no longer become a response
+    of its own. Raised out of the `StreamingResponse`, it left the HTTP response
+    unterminated and uvicorn closed the connection, which a keep-alive proxy in front
+    (Traefik) could reuse for the next request and answer with a 502. A client disconnect
+    arrives here as a cancellation, which `except Exception` does not catch.
+    """
+    try:
+        async for chunk in body:
+            yield chunk
+    except Exception as exc:  # pylint: disable=broad-except
+        if isinstance(exc, LLMUpstreamError):
+            # The class and the status only: a detail can quote the upstream's bytes.
+            log.warning(
+                "[gateways] upstream stream failed after the response started",
+                error_class=type(exc).__name__,
+                provider_key=exc.provider_key,
+                status_code=exc.status_code,
+            )
+        elif isinstance(exc, httpx.RequestError):
+            # Logs the class and a safe cause; the text may quote what was sent (OR86).
+            classify_transport_error(exc)
+        else:
+            log.error(
+                "[gateways] relayed stream failed after the response started",
+                error_class=type(exc).__name__,
+                exc_info=True,
+            )
+        yield _stream_error_frame(protocol, exc)
+    finally:
+        # Closing this generator does not close the one it reads. Closed here, the relay's
+        # own `finally` runs now and records the call, so a stream the client left is
+        # still measured and charged once (OR48). Shielded for the same reason as there.
+        # `LLMRelayResult.body` is typed as an iterator; every adapter yields a generator.
+        aclose = getattr(body, "aclose", None)
+        if aclose is not None:
+            await run_shielded(aclose())
 
 
 class LLMGatewayProxy:
@@ -386,10 +515,11 @@ class LLMGatewayProxy:
     ) -> Response:
         # Checked before the body is read: with the plane off there is nothing to relay to,
         # and a harness that pointed at this base URL needs the refusal, not a parse error.
-        if not env.llm_gateway.enabled:
+        if not await llm_gateway_serves_caller():
             return _map_domain_exception(LLMGatewayDisabledError())
 
         scope = get_auth_scope()
+
         raw_body = await request.body()
 
         try:
@@ -412,22 +542,25 @@ class LLMGatewayProxy:
                 body=raw_body,
                 headers=caller_headers,
                 protocol=protocol,
+                run_id=gateway_run_id(request),
+                run_labels=gateway_run_labels(request),
             )
 
-            if context.stream:
+            if context.stream and result.status_code < 400:
                 return StreamingResponse(
-                    result.body,
+                    _stream_with_terminal_error(result.body, protocol=protocol),
                     status_code=result.status_code,
                     headers=response_headers(result.headers),
                     media_type="text/event-stream",
                 )
 
-            chunk = await anext(result.body)
+            # Read whole, even on a stream, so a refusal raised while reading is answered here.
+            content = b"".join([chunk async for chunk in result.body])
         except _DOMAIN_EXCEPTIONS as exc:
             return _map_domain_exception(exc)
 
         return Response(
-            content=chunk,
+            content=content,
             status_code=result.status_code,
             headers=response_headers(result.headers),
         )
@@ -455,7 +588,7 @@ class LLMGatewayProxy:
         # Any, not Dict[str, Any]: the success path returns the OpenAI list body,
         # the denial path returns a JSONResponse — FastAPI passes a Response
         # instance through unprocessed either way.
-        if not env.llm_gateway.enabled:
+        if not await llm_gateway_serves_caller():
             return _map_domain_exception(LLMGatewayDisabledError())
 
         scope = get_auth_scope()

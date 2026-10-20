@@ -10,7 +10,10 @@
 import type {UIMessage} from "ai"
 import {createStore, Provider} from "jotai"
 import {renderToStaticMarkup} from "react-dom/server"
-import {describe, expect, it} from "vitest"
+import {describe, expect, it, vi} from "vitest"
+
+// The billing escapes read the router and the API; `AgentRunFailure.test.tsx` covers them.
+vi.mock("../hooks/useBillingEscapes", () => ({useBillingEscapes: () => ({})}))
 
 import AgentMessage from "./AgentMessage"
 
@@ -55,6 +58,6 @@ describe("AgentMessage: a run that failed", () => {
     it("wires the sign-in escape on the same grounds", () => {
         expect(
             text(failedTurn("The sign-in is no longer valid.", "subscription_login_required")),
-        ).toContain("Sign in again")
+        ).toContain("Open AI providers")
     })
 })

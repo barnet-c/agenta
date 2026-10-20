@@ -18,6 +18,18 @@ describe("deriveTurnStatus", () => {
         expect(status.noResponse).toBe(true)
     })
 
+    it("does not read a turn the user stopped as a non-response", () => {
+        const message = {
+            id: "a1",
+            role: "assistant",
+            parts: [],
+            metadata: {runStopped: true},
+        } as unknown as UIMessage
+        const status = deriveTurnStatus(message, {isUser: false, isStreaming: false})
+        expect(status.stopped).toBe(true)
+        expect(status.noResponse).toBe(false)
+    })
+
     it("counts a server notice as the turn's answer", () => {
         // Without this the turn is answer-less, which makes it a "no response" turn: the
         // desktop then renders the bubble as a failure and, after another empty turn, drops
@@ -193,6 +205,14 @@ describe("deriveTurnStatus", () => {
         expect(busy.errorText).toBe(
             "The model provider could not answer (HTTP 503): overloaded. Try again in a moment.",
         )
+        const slow = deriveTurnStatus(message, {
+            isUser: false,
+            isStreaming: false,
+            traceError: '408 {"message":"The model provider did not answer in time."}',
+        })
+        expect(slow.errorText).toBe(
+            "The model provider could not answer (HTTP 408): The model provider did not answer in time. Try again in a moment.",
+        )
     })
 
     it("ignores traceError once the turn produced an answer", () => {
@@ -317,6 +337,14 @@ describe("sanitizeErrorText", () => {
         expect(sanitizeErrorText("jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig rejected")).toBe(
             "jwt [secret] rejected",
         )
+    })
+
+    it("redacts a provider's masked copy of a key", () => {
+        expect(
+            sanitizeErrorText("Incorrect API key provided: sk-qa-re*********************0000."),
+        ).toBe("Incorrect API key provided: [secret].")
+        expect(sanitizeErrorText("over budget (sk-...3kKQ)")).toBe("over budget ([secret])")
+        expect(sanitizeErrorText("over budget (sk-....abcd)")).toBe("over budget ([secret])")
     })
 
     it("redacts anything shaped like a key", () => {

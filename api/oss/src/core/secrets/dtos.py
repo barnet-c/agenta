@@ -152,13 +152,29 @@ class SubscriptionLoginDTO(BaseModel):
 
 
 class SubscriptionLoginAttemptDTO(BaseModel):
-    """The in-flight device login, kept on the row so any API replica can poll it."""
+    """The device login this connection waits on, kept on the row.
+
+    The runner pod that runs the provider poll reports the outcome here, and every poll
+    answers from this record, so neither the browser's poll nor the outcome depends on
+    reaching that same pod again.
+    """
 
     id: str
     expires_at: Optional[str] = None
     user_code: Optional[str] = None
     verification_uri: Optional[str] = None
     poll_after_ms: Optional[int] = None
+    # `pending` until the runner reports `succeeded`, `failed`, or `expired`. A finished
+    # state stays until the browser's next poll has read it.
+    state: str = "pending"
+    # The runner's short reason word for a failed or expired attempt.
+    error: Optional[str] = None
+    # The URL of the runner pod that runs the provider poll, so a cancel reaches it. None
+    # when the runner reports no address of its own, and the cancel uses the Service URL.
+    runner_address: Optional[str] = None
+    # That pod's replica id. The cancel goes to `runner_address` only when the pod there
+    # answers with this id, since a dead pod's IP can pass to another pod.
+    runner_replica_id: Optional[str] = None
 
 
 class SubscriptionProviderDTO(BaseModel):
@@ -307,6 +323,10 @@ class OAuthGrantSettingsDTO(BaseModel):
     # identity-document strategy, which persists no registration at all. Both fall back
     # to the issuer's registration, which is where they were already looking.
     client_registration_slug: Optional[str] = None
+    # The client id these tokens were issued to. A grant from a client the person
+    # registered by hand, or from the identity document, has no registration row to
+    # name, so this is what keeps its renewal on the same client.
+    client_id: Optional[str] = None
 
 
 class OAuthGrantDTO(BaseModel):
@@ -508,10 +528,10 @@ def _validate_secret_data_based_on_kind(
         # lineup of their creation day. An explicit empty list stays an explicit "none".
         # Validate first, so a malformed list is refused as a validation error.
         subscription = SubscriptionProviderDTO.model_validate(data)
-        if (
-            subscription.models is not None
-            and set(subscription.models)
-            in SUBSCRIPTION_PROVIDER_MODEL_SNAPSHOTS[provider_kind]
+        if subscription.models is not None and (
+            set(subscription.models) == set(SUBSCRIPTION_PROVIDER_MODELS[provider_kind])
+            or set(subscription.models)
+            in SUBSCRIPTION_PROVIDER_MODEL_SNAPSHOTS.get(provider_kind, ())
         ):
             subscription.models = None
         if subscription.harnesses is not None and set(subscription.harnesses) == set(
