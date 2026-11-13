@@ -17,7 +17,10 @@ from oss.src.core.shared.dtos import (
 )
 from oss.src.core.git.utils import build_retrieval_info
 from oss.src.core.git.types import CommitLockTimeout
-from oss.src.core.embeds.exceptions import NonEmbeddableWorkflowReferenceError
+from oss.src.core.embeds.exceptions import (
+    EmbedReferenceInconsistentError,
+    NonEmbeddableWorkflowReferenceError,
+)
 from oss.src.apis.fastapi.git.exceptions import handle_git_exceptions
 from oss.src.apis.fastapi.workflows.exceptions import handle_workflow_exceptions
 from oss.src.core.workflows.change_set import ChangeSetError
@@ -54,6 +57,7 @@ from oss.src.apis.fastapi.workflows.models import (
     WorkflowRevisionCreateRequest,
     WorkflowRevisionEditRequest,
     WorkflowRevisionQueryRequest,
+    WorkflowRevisionRequirementsQueryRequest,
     WorkflowRevisionCommitRequest,
     WorkflowRevisionRetrieveRequest,
     WorkflowRevisionDeployRequest,
@@ -112,6 +116,24 @@ from oss.src.resources.workflows.catalog import (
 from oss.src.core.access.permissions.types import Permission
 from oss.src.core.access.permissions.service import check_action_access
 from oss.src.apis.fastapi.shared.exceptions import FORBIDDEN_EXCEPTION
+from oss.src.apis.fastapi.sharing.utils import (
+    agent_owner_for_request,
+    agent_read_scope_for_request,
+    allow_agent,
+    artifact_id_of,
+    policy_for_request,
+    visible_by_agent,
+)
+from oss.src.core.git.types import VariantForkError, VariantNotFound
+from oss.src.core.shared.exceptions import EntityCreationConflict
+from oss.src.core.sharing.dtos import SharedItemKind
+from oss.src.core.agent_requirements.dtos import AgentRequirements
+from oss.src.core.agent_requirements.service import AgentRequirementsService
+from oss.src.utils.context import get_auth_scope
+from oss.src.core.access.context import get_request_access
+from oss.src.core.access.organizations import OrganizationAction, decide_organization
+from oss.src.core.account_choices.items import run_person_id
+from oss.src.middlewares.auth import request_run_envelope
 
 
 log = get_module_logger(__name__)
@@ -198,6 +220,8 @@ class WorkflowsRouter:
     ):
         self.workflows_service = workflows_service
         self.environments_service = environments_service
+        # Set at wiring, after the gateway services it reads exist.
+        self.requirements_service: Optional[AgentRequirementsService] = None
 
         self.router = APIRouter()
 
@@ -490,6 +514,16 @@ class WorkflowsRouter:
         )
 
         self.router.add_api_route(
+            "/revisions/requirements/query",
+            self.query_workflow_revision_requirements,
+            methods=["POST"],
+            operation_id="query_workflow_revision_requirements",
+            status_code=status.HTTP_200_OK,
+            response_model=AgentRequirements,
+            response_model_exclude_none=True,
+        )
+
+        self.router.add_api_route(
             "/revisions/query",
             self.query_workflow_revisions,
             methods=["POST"],
@@ -527,6 +561,44 @@ class WorkflowsRouter:
             status_code=status.HTTP_200_OK,
             response_model=WorkflowRevisionResolveResponse,
             response_model_exclude_none=True,
+        )
+
+    # SHARING --------------------------------------------------------------------
+
+    async def _allow_variant_agent(
+        self,
+        request: Request,
+        *,
+        action: Permission,
+        workflow_variant_id: UUID,
+        unknown_allowed: bool = True,
+    ) -> bool:
+        """The policy of the agent a variant belongs to, read from the variant. An
+        unknown variant is allowed (the route's own not-found path answers), unless
+        `unknown_allowed` is False: a commit then answers `VariantNotFound` for an
+        unknown and a hidden variant alike."""
+        variant = await self.workflows_service.fetch_workflow_variant(
+            project_id=UUID(request.state.project_id),
+            workflow_variant_ref=Reference(id=workflow_variant_id),
+        )
+        if variant is None:
+            return unknown_allowed
+        return await allow_agent(
+            request, action=action, artifact_id=artifact_id_of(variant)
+        )
+
+    async def _allow_revision_agent(
+        self, request: Request, *, action: Permission, workflow_revision_id: UUID
+    ) -> bool:
+        """The policy of the agent a revision belongs to, read from the revision."""
+        revision = await self.workflows_service.fetch_workflow_revision(
+            project_id=UUID(request.state.project_id),
+            workflow_revision_ref=Reference(id=workflow_revision_id),
+        )
+        if revision is None:
+            return True
+        return await allow_agent(
+            request, action=action, artifact_id=artifact_id_of(revision)
         )
 
     # WORKFLOW CATALOG ---------------------------------------------------------
@@ -777,6 +849,12 @@ class WorkflowsRouter:
             user_id=UUID(request.state.user_id),
             #
             workflow_create=workflow_create_request.workflow,
+            #
+            access=policy_for_request(
+                request,
+                kind=SharedItemKind.AGENT,
+                requested=workflow_create_request.workflow.visibility,
+            ),
         )
 
         # Invalidate legacy caches so the registry/apps list reflects the new workflow
@@ -818,6 +896,10 @@ class WorkflowsRouter:
             #
             workflow_ref=Reference(id=workflow_id),
         )
+        if workflow and not await allow_agent(
+            request, action=Permission.VIEW_WORKFLOWS, artifact_id=workflow.id
+        ):
+            workflow = None
 
         workflow_response = WorkflowResponse(
             count=1 if workflow else 0,
@@ -869,11 +951,17 @@ class WorkflowsRouter:
                 detail="workflow.name must contain a non-whitespace character.",
             )
 
-        workflow = await self.workflows_service.edit_workflow(
-            project_id=UUID(request.state.project_id),
-            user_id=UUID(request.state.user_id),
-            #
-            workflow_edit=workflow_edit_request.workflow,
+        workflow = (
+            await self.workflows_service.edit_workflow(
+                project_id=UUID(request.state.project_id),
+                user_id=UUID(request.state.user_id),
+                #
+                workflow_edit=workflow_edit_request.workflow,
+            )
+            if await allow_agent(
+                request, action=Permission.EDIT_WORKFLOWS, artifact_id=workflow_id
+            )
+            else None
         )
 
         if not workflow:
@@ -911,6 +999,10 @@ class WorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+        if not await allow_agent(
+            request, action=Permission.EDIT_WORKFLOWS, artifact_id=workflow_id
+        ):
+            return WorkflowResponse(count=0, workflow=None)
 
         workflow = await self.workflows_service.archive_workflow(
             project_id=UUID(request.state.project_id),
@@ -950,6 +1042,10 @@ class WorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+        if not await allow_agent(
+            request, action=Permission.EDIT_WORKFLOWS, artifact_id=workflow_id
+        ):
+            return WorkflowResponse(count=0, workflow=None)
 
         workflow = await self.workflows_service.unarchive_workflow(
             project_id=UUID(request.state.project_id),
@@ -1013,6 +1109,7 @@ class WorkflowsRouter:
 
         workflows = await self.workflows_service.query_workflows(
             project_id=UUID(request.state.project_id),
+            read_scope=await agent_read_scope_for_request(request),
             #
             workflow_query=workflow_query_request.workflow,
             #
@@ -1063,6 +1160,12 @@ class WorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+        artifact_id = artifact_id_of(workflow_variant_create_request.workflow_variant)
+        if not await allow_agent(
+            request, action=Permission.EDIT_WORKFLOWS, artifact_id=artifact_id
+        ):
+            # What a variant of an unknown workflow answers: the foreign key conflict.
+            raise EntityCreationConflict(conflict={"artifact_id": str(artifact_id)})
 
         workflow_variant = await self.workflows_service.create_workflow_variant(
             project_id=UUID(request.state.project_id),
@@ -1110,6 +1213,12 @@ class WorkflowsRouter:
             #
             workflow_variant_ref=Reference(id=workflow_variant_id),
         )
+        if workflow_variant and not await allow_agent(
+            request,
+            action=Permission.VIEW_WORKFLOWS,
+            artifact_id=artifact_id_of(workflow_variant),
+        ):
+            workflow_variant = None
 
         workflow_variant_response = WorkflowVariantResponse(
             count=1 if workflow_variant else 0,
@@ -1146,6 +1255,12 @@ class WorkflowsRouter:
             workflow_variant_edit_request.workflow_variant.id
         ):
             return WorkflowVariantResponse()
+        if not await self._allow_variant_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            workflow_variant_id=workflow_variant_id,
+        ):
+            return WorkflowVariantResponse(count=0, workflow_variant=None)
 
         workflow_variant = await self.workflows_service.edit_workflow_variant(
             project_id=UUID(request.state.project_id),
@@ -1181,6 +1296,12 @@ class WorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+        if not await self._allow_variant_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            workflow_variant_id=workflow_variant_id,
+        ):
+            return WorkflowVariantResponse(count=0, workflow_variant=None)
 
         workflow_variant = await self.workflows_service.archive_workflow_variant(
             project_id=UUID(request.state.project_id),
@@ -1218,6 +1339,12 @@ class WorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+        if not await self._allow_variant_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            workflow_variant_id=workflow_variant_id,
+        ):
+            return WorkflowVariantResponse(count=0, workflow_variant=None)
 
         workflow_variant = await self.workflows_service.unarchive_workflow_variant(
             project_id=UUID(request.state.project_id),
@@ -1283,6 +1410,7 @@ class WorkflowsRouter:
 
         workflow_variants = await self.workflows_service.query_workflow_variants(
             project_id=UUID(request.state.project_id),
+            read_scope=await agent_read_scope_for_request(request),
             #
             workflow_variant_query=workflow_variant_query_request.workflow_variant,
             #
@@ -1324,6 +1452,19 @@ class WorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+
+        source = await self.workflows_service.fetch_workflow_revision(
+            project_id=UUID(request.state.project_id),
+            workflow_variant_ref=workflow_fork_request.workflow_variant_ref,
+            workflow_revision_ref=workflow_fork_request.workflow_revision_ref,
+        )
+        if source and not await allow_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            artifact_id=artifact_id_of(source),
+        ):
+            # What a fork of an unknown source answers.
+            raise VariantForkError("Fork source variant could not be resolved.")
 
         await _require_fork_secret_attachment_access(
             request,
@@ -1368,6 +1509,17 @@ class WorkflowsRouter:
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
 
+        create_variant_id = (
+            workflow_revision_create_request.workflow_revision.workflow_variant_id
+        )
+        if create_variant_id and not await self._allow_variant_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            workflow_variant_id=create_variant_id,
+            unknown_allowed=False,
+        ):
+            raise VariantNotFound(variant_id=create_variant_id)
+
         await _require_secret_attachment_access(
             request, workflow_revision_create_request.workflow_revision
         )
@@ -1385,6 +1537,10 @@ class WorkflowsRouter:
             ),
             #
             initial=True,
+            #
+            first_agent_owner_user_id=policy_for_request(
+                request, kind=SharedItemKind.AGENT
+            ).owner_user_id,
         )
 
         # Invalidate legacy caches so the registry page reflects the new revision
@@ -1401,6 +1557,109 @@ class WorkflowsRouter:
         )
 
         return workflow_revision_response
+
+    @intercept_exceptions()
+    async def query_workflow_revision_requirements(
+        self,
+        request: Request,
+        *,
+        body: WorkflowRevisionRequirementsQueryRequest,
+    ) -> AgentRequirements:
+        """The items an agent names that need setup where it runs.
+
+        Reads references only and never changes the agent. Saving never runs this check.
+        """
+        if not await check_action_access(  # type: ignore
+            user_uid=request.state.user_id,
+            project_id=request.state.project_id,
+            permission=Permission.VIEW_WORKFLOWS,  # type: ignore
+        ):
+            raise FORBIDDEN_EXCEPTION  # type: ignore
+        assert self.requirements_service is not None, "wired in entrypoints/routers.py"
+
+        parameters = body.parameters
+        artifact_id: Optional[UUID] = body.workflow_id
+        if body.workflow_revision_ref is None:
+            if artifact_id is not None and not await allow_agent(
+                request,
+                action=Permission.VIEW_WORKFLOWS,
+                artifact_id=artifact_id,
+            ):
+                raise HTTPException(status_code=404, detail="Workflow not found.")
+        else:
+            revision = await self.workflows_service.fetch_workflow_revision(
+                project_id=UUID(request.state.project_id),
+                #
+                workflow_revision_ref=body.workflow_revision_ref,
+            )
+            artifact_id = artifact_id_of(revision) if revision else None
+            if (
+                revision is None
+                # Another agent's revision: the answer an unknown revision gets.
+                or (body.workflow_id is not None and body.workflow_id != artifact_id)
+                or not await allow_agent(
+                    request,
+                    action=Permission.VIEW_WORKFLOWS,
+                    artifact_id=artifact_id,
+                )
+            ):
+                raise HTTPException(status_code=404, detail="Revision not found.")
+            parameters = revision.data.parameters if revision.data else None
+
+        async def _allowed(permission: Permission) -> bool:
+            return bool(
+                await check_action_access(  # type: ignore
+                    user_uid=request.state.user_id,
+                    project_id=request.state.project_id,
+                    permission=permission,  # type: ignore
+                )
+            )
+
+        async def _can_edit_agent() -> bool:
+            if not await _allowed(Permission.EDIT_WORKFLOWS):
+                return False
+            if artifact_id is None:
+                return True
+            return bool(
+                await allow_agent(
+                    request,
+                    action=Permission.EDIT_WORKFLOWS,
+                    artifact_id=artifact_id,
+                )
+            )
+
+        async def _may_run_agent() -> bool:
+            if not await _allowed(Permission.RUN_SESSIONS):
+                return False
+            return bool(
+                await allow_agent(
+                    request,
+                    action=Permission.RUN_SESSIONS,
+                    artifact_id=artifact_id,
+                )
+            )
+
+        async def _manages_organization() -> bool:
+            organization_id = getattr(request.state, "organization_id", None)
+            if not organization_id:
+                return False
+            decision = await decide_organization(
+                access=get_request_access(),
+                organization_id=UUID(str(organization_id)),
+                action=OrganizationAction.MANAGE_ORGANIZATION_SECRETS,
+            )
+            return bool(decision.allowed)
+
+        return await self.requirements_service.check(
+            scope=get_auth_scope(),
+            parameters=parameters if isinstance(parameters, dict) else None,
+            artifact_id=artifact_id,
+            run_person_id=run_person_id(request_run_envelope(request)),
+            can_edit_agent=_can_edit_agent,
+            allowed=_allowed,
+            may_run_agent=_may_run_agent,
+            manages_organization=_manages_organization,
+        )
 
     @intercept_exceptions()
     @suppress_exceptions(default=WorkflowRevisionResponse(), exclude=[HTTPException])
@@ -1422,6 +1681,12 @@ class WorkflowsRouter:
             #
             workflow_revision_ref=Reference(id=workflow_revision_id),
         )
+        if workflow_revision and not await allow_agent(
+            request,
+            action=Permission.VIEW_WORKFLOWS,
+            artifact_id=artifact_id_of(workflow_revision),
+        ):
+            workflow_revision = None
 
         await publish_revision_event(
             request=request,
@@ -1458,6 +1723,12 @@ class WorkflowsRouter:
             workflow_revision_request.workflow_revision.id
         ):
             return WorkflowRevisionResponse()
+        if not await self._allow_revision_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            workflow_revision_id=workflow_revision_id,
+        ):
+            return WorkflowRevisionResponse(count=0, workflow_revision=None)
 
         workflow_revision = await self.workflows_service.edit_workflow_revision(
             project_id=UUID(request.state.project_id),
@@ -1486,6 +1757,12 @@ class WorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+        if not await self._allow_revision_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            workflow_revision_id=workflow_revision_id,
+        ):
+            return WorkflowRevisionResponse(count=0, workflow_revision=None)
 
         workflow_revision = await self.workflows_service.archive_workflow_revision(
             project_id=UUID(request.state.project_id),
@@ -1517,6 +1794,12 @@ class WorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+        if not await self._allow_revision_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            workflow_revision_id=workflow_revision_id,
+        ):
+            return WorkflowRevisionResponse(count=0, workflow_revision=None)
 
         workflow_revision = await self.workflows_service.unarchive_workflow_revision(
             project_id=UUID(request.state.project_id),
@@ -1566,6 +1849,7 @@ class WorkflowsRouter:
 
         workflow_revisions = await self.workflows_service.query_workflow_revisions(
             project_id=UUID(request.state.project_id),
+            read_scope=await agent_read_scope_for_request(request),
             #
             workflow_revision_query=workflow_revision_query_request.workflow_revision,
             #
@@ -1598,6 +1882,12 @@ class WorkflowsRouter:
             revisions=workflow_revisions,
             count=len(workflow_revisions),
         )
+
+        if workflow_revision_query_request.include_data is False:
+            workflow_revisions = [
+                workflow_revision.model_copy(update={"data": None})
+                for workflow_revision in workflow_revisions
+            ]
 
         workflow_revisions_response = WorkflowRevisionsResponse(
             count=len(workflow_revisions),
@@ -1657,6 +1947,14 @@ class WorkflowsRouter:
                 status_code=400,
                 detail="workflow_revision.workflow_variant_id is required when committing a workflow revision.",
             )
+        # The agent comes from the variant, never from the body's own workflow id.
+        if not await self._allow_variant_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            workflow_variant_id=variant_id,
+            unknown_allowed=False,
+        ):
+            raise VariantNotFound(variant_id=variant_id)
 
         # A commit carries data (full replace) or delta (ops merged onto the latest revision),
         # never both. Empty is allowed only as the v0 seed (intentionally null data/flags/meta);
@@ -1739,6 +2037,10 @@ class WorkflowsRouter:
                 workflow_revision_commit=workflow_revision_commit_request.workflow_revision,
                 #
                 scope_policy=scope_policy,
+                #
+                first_agent_owner_user_id=policy_for_request(
+                    request, kind=SharedItemKind.AGENT
+                ).owner_user_id,
             )
         except RevisionConflictError as e:
             raise HTTPException(status_code=409, detail=e.to_detail()) from e
@@ -1748,6 +2050,20 @@ class WorkflowsRouter:
             raise HTTPException(status_code=422, detail=e.to_detail()) from e
         except ChangeSetError as e:
             raise HTTPException(status_code=422, detail=e.to_detail()) from e
+        except EmbedReferenceInconsistentError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "inconsistent_embed_reference",
+                    "message": e.message,
+                    "retryable": False,
+                    "next_step": (
+                        "Remove that entry, add it again from the picker, and send the "
+                        "commit again."
+                    ),
+                    "details": {"slug": e.slug} if e.slug else {},
+                },
+            ) from e
         except NonEmbeddableWorkflowReferenceError as e:
             # One code, one status. This used to answer 422 here and 400 everywhere else
             # the same failure is raised, so a caller had to learn the status per route
@@ -1839,6 +2155,9 @@ class WorkflowsRouter:
             #
             workflow_revisions_log=workflow_revisions_log_request.workflow_revisions,
         )
+        workflow_revisions = await visible_by_agent(
+            request, workflow_revisions, action=Permission.VIEW_WORKFLOWS
+        )
 
         await publish_revision_event(
             request=request,
@@ -1907,6 +2226,12 @@ class WorkflowsRouter:
             workflow_variant_ref=workflow_deploy_request.workflow_variant_ref,
             workflow_revision_ref=workflow_deploy_request.workflow_revision_ref,
         )
+        if workflow_revision and not await allow_agent(
+            request,
+            action=Permission.EDIT_WORKFLOWS,
+            artifact_id=artifact_id_of(workflow_revision),
+        ):
+            workflow_revision = None
 
         if not workflow_revision:
             raise HTTPException(
@@ -2113,6 +2438,14 @@ class WorkflowsRouter:
             ),
         )
 
+        if workflow_revision and not await allow_agent(
+            request,
+            action=Permission.VIEW_WORKFLOWS,
+            artifact_id=artifact_id_of(workflow_revision),
+        ):
+            # What a retrieve of an unknown reference answers.
+            workflow_revision, resolution_info, retrieval_info = None, None, None
+
         if environment_lookup_requested and not workflow_revision:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -2181,6 +2514,12 @@ class WorkflowsRouter:
 
         # Unpack the result tuple
         workflow_revision, resolution_info = result
+        if workflow_revision and not await allow_agent(
+            request,
+            action=Permission.VIEW_WORKFLOWS,
+            artifact_id=artifact_id_of(workflow_revision),
+        ):
+            return WorkflowRevisionResolveResponse()
 
         # Build resolution metadata
         resolution_info = ResolutionInfo(
@@ -2328,6 +2667,11 @@ class SimpleWorkflowsRouter:
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
 
+        access = policy_for_request(
+            request,
+            kind=SharedItemKind.AGENT,
+            requested=simple_workflow_create_request.workflow.visibility,
+        )
         simple_workflow = await self.simple_workflows_service.create(
             project_id=UUID(request.state.project_id),
             user_id=UUID(request.state.user_id),
@@ -2335,6 +2679,9 @@ class SimpleWorkflowsRouter:
             simple_workflow_create=simple_workflow_create_request.workflow,
             #
             workflow_id=workflow_id,
+            #
+            access=access,
+            first_agent_owner_user_id=access.owner_user_id,
         )
 
         await invalidate_cache(project_id=request.state.project_id)
@@ -2364,6 +2711,10 @@ class SimpleWorkflowsRouter:
             #
             workflow_id=workflow_id,
         )
+        if simple_workflow and not await allow_agent(
+            request, action=Permission.VIEW_WORKFLOWS, artifact_id=workflow_id
+        ):
+            simple_workflow = None
 
         return SimpleWorkflowResponse(
             count=1 if simple_workflow else 0,
@@ -2389,12 +2740,18 @@ class SimpleWorkflowsRouter:
 
         if str(workflow_id) != str(simple_workflow_edit_request.workflow.id):
             return SimpleWorkflowResponse()
+        if not await allow_agent(
+            request, action=Permission.EDIT_WORKFLOWS, artifact_id=workflow_id
+        ):
+            return SimpleWorkflowResponse(count=0, workflow=None)
 
         simple_workflow = await self.simple_workflows_service.edit(
             project_id=UUID(request.state.project_id),
             user_id=UUID(request.state.user_id),
             #
             simple_workflow_edit=simple_workflow_edit_request.workflow,
+            #
+            first_agent_owner_user_id=agent_owner_for_request(request),
         )
 
         return SimpleWorkflowResponse(
@@ -2415,6 +2772,10 @@ class SimpleWorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+        if not await allow_agent(
+            request, action=Permission.EDIT_WORKFLOWS, artifact_id=workflow_id
+        ):
+            return SimpleWorkflowResponse(count=0, workflow=None)
 
         simple_workflow = await self.simple_workflows_service.archive(
             project_id=UUID(request.state.project_id),
@@ -2443,6 +2804,10 @@ class SimpleWorkflowsRouter:
             permission=Permission.EDIT_WORKFLOWS,  # type: ignore
         ):
             raise FORBIDDEN_EXCEPTION  # type: ignore
+        if not await allow_agent(
+            request, action=Permission.EDIT_WORKFLOWS, artifact_id=workflow_id
+        ):
+            return SimpleWorkflowResponse(count=0, workflow=None)
 
         simple_workflow = await self.simple_workflows_service.unarchive(
             project_id=UUID(request.state.project_id),
@@ -2475,6 +2840,7 @@ class SimpleWorkflowsRouter:
 
         simple_workflows = await self.simple_workflows_service.query(
             project_id=UUID(request.state.project_id),
+            read_scope=await agent_read_scope_for_request(request),
             #
             simple_workflow_query=simple_workflow_query_request.workflow,
             #

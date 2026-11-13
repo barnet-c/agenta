@@ -1,5 +1,6 @@
 import {useCallback} from "react"
 
+import type {Visibility} from "@agenta/entities/sharing"
 import {
     createEphemeralAppFromTemplate,
     createWorkflowFromEphemeralAtom,
@@ -40,8 +41,10 @@ export interface CreateAgentParams {
     stagingSessionId?: string
     attachmentIds?: string[]
     initialMessage?: string
-    /** Account choices made in the starter setup step. */
+    /** Ignored: web/oss still passes it. Connection choices come from the project's live connections. */
     setup?: AgentSetupSelection
+    /** Who sees the new agent. Omitted, the server keeps its default. */
+    visibility?: Visibility
 }
 
 export interface UseCreateAgentOptions {
@@ -77,7 +80,7 @@ export const useCreateAgent = ({onError}: UseCreateAgentOptions = {}) => {
             initialMessage,
             stagingSessionId,
             attachmentIds,
-            setup,
+            visibility,
         }: CreateAgentParams = {}): Promise<CreatedAgent | null> => {
             if (creating) return null
             creating = true
@@ -102,7 +105,7 @@ export const useCreateAgent = ({onError}: UseCreateAgentOptions = {}) => {
                         initialMessage,
                         stagingSessionId,
                         attachmentIds,
-                        setup,
+                        visibility,
                     })
                     return {
                         appId: result.workflow_id,
@@ -126,6 +129,7 @@ export const useCreateAgent = ({onError}: UseCreateAgentOptions = {}) => {
                     revisionId: ephemeralId,
                     name: agentName,
                     slug,
+                    visibility,
                 })
                 if (!result.success) {
                     onError?.(extractApiErrorMessage(result.error))

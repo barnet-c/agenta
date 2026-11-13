@@ -251,7 +251,6 @@ export {
     TOOL_SPECS,
     // Composite controls
     ObjectSchemaControl,
-    CollapsibleObjectControl,
     SchemaPropertyRenderer,
     // Context providers
     FieldsDetectionProvider,
@@ -421,11 +420,7 @@ export {SectionDrawer} from "./SchemaControls/SectionDrawer"
 export type {SectionDrawerProps} from "./SchemaControls/SectionDrawer"
 export {SectionQuickAction} from "./SchemaControls/SectionQuickAction"
 export type {SectionQuickActionProps} from "./SchemaControls/SectionQuickAction"
-export {
-    ProviderLogo,
-    SubSectionHeader,
-    CollapsibleProviderGroup,
-} from "./SchemaControls/sectionGroups"
+export {ProviderLogo, SubSectionHeader} from "./SchemaControls/sectionGroups"
 
 // Tool / skill / MCP item + form views. Presentational and prop-driven (the drawer owns the
 // value); surfaced so the Storybook component inventory can render each one.
@@ -453,11 +448,18 @@ export type {ReferenceToolFormViewProps} from "./SchemaControls/ReferenceToolFor
 export {McpServerFormView} from "./SchemaControls/McpServerFormView"
 export type {McpServerFormViewProps} from "./SchemaControls/McpServerFormView"
 export {SkillFormView} from "./SchemaControls/SkillFormView"
+export {SkillFormSkeleton} from "./SchemaControls/DrawerSkeletons"
 export type {SkillFormViewProps} from "./SchemaControls/SkillFormView"
 export {SkillUploadZone} from "./SchemaControls/SkillUploadZone"
 export type {SkillUploadZoneProps} from "./SchemaControls/SkillUploadZone"
 export {scanSkillFromDataTransfer, scanSkillFromFileList} from "./SchemaControls/skillUpload"
 export type {ParsedSkill, SkillScanCandidate, SkillUploadScan} from "./SchemaControls/skillUpload"
+export {
+    buildSkillDownload,
+    composeSkillMarkdown,
+    downloadSkill,
+} from "./SchemaControls/skillDownload"
+export type {SkillDownload} from "./SchemaControls/skillDownload"
 
 // Agent config panel — presentational siblings of the AgentTemplateControl container (the
 // control itself stays code-split behind SchemaPropertyRenderer's lazy import). Prop-driven,
@@ -481,3 +483,5 @@ export type {
 // The panel's instructions file row, reused read-only by surfaces that show an agent's brief
 // without editing it (the agent overview).
 export {InstructionsFileRow, ItemRow} from "./SchemaControls/agentTemplate/ItemRow"
+export {NeedsSetupTag, type NeedsSetupTagProps} from "./SchemaControls/agentTemplate/NeedsSetupTag"
+export {needsSetupStatus} from "./SchemaControls/agentTemplate/needsSetup"

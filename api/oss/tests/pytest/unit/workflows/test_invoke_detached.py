@@ -20,6 +20,8 @@ from oss.src.core.workflows.types import (
     WorkflowDetachedStartNeverSent,
     WorkflowDetachedStartRejected,
 )
+from oss.tests.pytest.utils.principals import make_envelope
+from oss.tests.pytest.utils.sharing import NoopRunAdmission
 
 
 @pytest.fixture(autouse=True)
@@ -323,6 +325,7 @@ async def test_invoke_workflow_detached_returns_run_id_and_threads_meta():
         user_id=user_id,
         request=request,
         run_id="run-fixed",
+        envelope=make_envelope(),
     )
 
     assert result.run_id == "run-fixed"
@@ -353,6 +356,7 @@ async def test_invoke_workflow_detached_enables_strict_handshake_for_control_com
         user_id=uuid4(),
         request=WorkflowServiceRequest(meta={"control_command_id": str(uuid4())}),
         run_id="run-control",
+        envelope=make_envelope(),
     )
 
     assert captured["strict_first_record"] is True
@@ -379,6 +383,7 @@ async def test_invoke_workflow_detached_enables_explicit_strict_start():
         request=WorkflowServiceRequest(),
         run_id="run-strict",
         strict_start=True,
+        envelope=make_envelope(),
     )
 
     assert captured["strict_first_record"] is True
@@ -396,6 +401,7 @@ async def test_invoke_workflow_detached_raises_when_no_service_url():
             project_id=uuid4(),
             user_id=uuid4(),
             request=WorkflowServiceRequest(),
+            envelope=make_envelope(),
         )
 
 
@@ -410,6 +416,7 @@ async def test_invoke_workflow_batch_still_returns_400_when_no_service_url():
         project_id=uuid4(),
         user_id=uuid4(),
         request=WorkflowServiceRequest(),
+        envelope=make_envelope(),
     )
     assert result.status.code == 400
 
@@ -427,6 +434,7 @@ async def test_ordinary_session_invoke_redelivers_recoverable_continuation(monke
         project_id=project_id,
         user_id=uuid4(),
         request=WorkflowServiceRequest(session_id="session-1"),
+        envelope=make_envelope(),
     )
 
     assert result.status.code == 409
@@ -448,6 +456,7 @@ async def test_control_continuation_bypasses_ordinary_send_recovery_hook(monkeyp
         request=WorkflowServiceRequest(
             session_id="session-1", meta={"control_command_id": "command-1"}
         ),
+        envelope=make_envelope(),
     )
 
     assert result.status.code == 400
@@ -465,15 +474,18 @@ def test_dispatch_fn_injected_into_both_consumers():
         return "run-1"
 
     worker = InteractionsDispatcher(
+        run_admission=NoopRunAdmission(),
         workflows_service=SimpleNamespace(),
         interactions_service=SimpleNamespace(),
         dispatch_fn=_dispatch,
     )
     dispatcher = TriggersDispatcher(
+        run_admission=NoopRunAdmission(),
         triggers_dao=SimpleNamespace(),
         session_claims_dao=SimpleNamespace(),
         workflows_service=SimpleNamespace(),
         dispatch_fn=_dispatch,
+        sharing_service=SimpleNamespace(),
     )
     assert worker._dispatch_fn is _dispatch
     assert dispatcher._dispatch_fn is _dispatch

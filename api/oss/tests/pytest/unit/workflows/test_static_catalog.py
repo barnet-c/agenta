@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import pytest
 
+from oss.src.core.sharing.dtos import AgentReadScope
 from oss.src.core.embeds.exceptions import NonEmbeddableWorkflowReferenceError
 from oss.src.core.embeds.service import EmbedsService
 from oss.src.core.shared.dtos import Reference
@@ -913,6 +914,7 @@ async def test_query_does_not_filter_on_is_static():
 
     await service.query_workflows(
         project_id=uuid4(),
+        read_scope=AgentReadScope(owner_user_id=None),
         workflow_query=WorkflowQuery(
             flags=WorkflowArtifactQueryFlags(is_application=True),
         ),
@@ -1035,6 +1037,8 @@ def test_request_secret_catalog_entry_shape():
     assert tool["render"] == {"kind": "secret"}
     assert tool["input_schema"]["required"] == ["name", "env_var", "reason"]
     assert "value" not in tool["input_schema"]["properties"]
+    assert tool["input_schema"]["properties"]["rejected"]["type"] == "boolean"
+    assert "`rejected: true`" in tool["description"]
     # The usage rules live on the tool, not in the always-on platform preamble: an agent that
     # cannot see this tool must not be told about the secret setup flow at all.
     description = tool["description"]

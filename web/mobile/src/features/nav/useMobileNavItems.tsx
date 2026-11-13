@@ -1,8 +1,10 @@
 import {createElement, useCallback, useMemo, type ReactNode} from "react"
 
+import {promptWorkflowsListQueryStateAtom, type Workflow} from "@agenta/entities/workflow"
 import {
     AGENTS_SIDEBAR_KEY,
     buildHelpDocsNavItem,
+    buildInviteTeammateNavItem,
     defineSidebarEntity,
     resolveChildren,
     SESSIONS_SIDEBAR_KEY,
@@ -21,20 +23,27 @@ import {
     type SidebarEntityRef,
 } from "@agenta/navigation"
 import {buildReleaseNavItems, SessionFilterMenu, SessionSearchButton} from "@agenta/navigation-ui"
-import {SessionRowActions, useSessionActions, useSessionRowChrome} from "@agenta/sessions-ui"
+import {sessionRoutePath} from "@agenta/sessions/link"
+import {
+    SessionRowActions,
+    useSessionActions,
+    useSessionRowChrome,
+    type SessionActionTarget,
+} from "@agenta/sessions-ui"
+import {betaDeveloperModeActiveAtom, userAtom} from "@agenta/shared/state"
 import {getShortcut, shortcutAria, shortcutFaces} from "@agenta/shared/utils"
 import {useIsMacPlatform} from "@agenta/ui/shortcuts"
 import {Spinner} from "@agenta/ui/ui"
 import {
-    ChartLineUpIcon,
     ChatsCircleIcon,
     CircleIcon,
     GearIcon,
     GithubLogoIcon,
-    GraduationCapIcon,
+    CompassIcon,
     HouseIcon,
     KeyboardIcon,
     LightningIcon,
+    PaperPlaneIcon,
     QuestionIcon,
     RobotIcon,
     ScrollIcon,
@@ -43,13 +52,20 @@ import {
 } from "@phosphor-icons/react"
 import {atom, useAtomValue, useSetAtom} from "jotai"
 import {unwrap} from "jotai/utils"
+import {useRouter} from "next/router"
 
+import {agentEntryHref} from "@/features/agents/agentEntry"
+import {shareDialogRequestAtom} from "@/features/chat/shareDialogState"
 import {useLeaveSession} from "@/features/chat/useLeaveSession"
 import {startBlankSession} from "@/features/chat/useStartBlankSession"
+import {useEnabledDeveloperViews} from "@/features/developer/developerViewAccess"
 import {whatsNewAtom} from "@/features/education/whatsNewAtom"
+
+import {useProjectPermission} from "../context/useProjectPermission"
 
 import {AgentsNavAction} from "./AgentsNavAction"
 import {AgentsQuickPanel} from "./AgentsQuickPanel"
+import {developerNavSlots, PROMPTS_ROW_KEY} from "./developerNavSlots"
 import {useSyncLocalSessionRefs} from "./localSessionRefs"
 
 /** The drawer's scope id — its open-groups persistence bucket. */
@@ -59,9 +75,6 @@ export const MOBILE_NAV_SCOPE_ID = "mobile-main"
 setSidebarSessionFilterDefaults(MOBILE_NAV_SCOPE_ID, {groupBy: "agent"})
 /** The registry entry for ⌘K / Ctrl+K, which `MobileCommandPalette` binds. */
 const PALETTE_SHORTCUT_ID = "palette.open"
-
-/** Flip to show the Observability rail entry again — the screen and its route are untouched. */
-const SHOW_OBSERVABILITY = false
 
 /**
  * Mobile's registration over the SHARED machinery: same gated sessions source, same
@@ -115,11 +128,11 @@ export const mobileSessionsEntity = defineSidebarEntity<SessionSidebarRef>(
         groupsAtom: sidebarSessionGroupsAtomFamily(MOBILE_NAV_SCOPE_ID),
         // An agent heading's "+" opens a blank session with that agent — the same start every
         // other "+" in the app makes. The session id is minted on the click, so the anchor's
-        // own href is the agent's page: what a long-press / open-in-new-tab lands on.
+        // own href is the agent entry link: what a long-press / open-in-new-tab lands on.
         groupAdd: (group, projectURL) =>
             group.agentId
                 ? {
-                      link: `${projectURL}/agents/${group.agentId}`,
+                      link: agentEntryHref(projectURL, group.agentId),
                       label: `New session with ${group.label}`,
                       onClick: (event) => {
                           event.preventDefault()
@@ -131,6 +144,24 @@ export const mobileSessionsEntity = defineSidebarEntity<SessionSidebarRef>(
         // No visible cap: the rail renders every row it fetched, so nothing is dropped between
         // the request and the render. The server window is the only bound.
         maxItems: SIDEBAR_UNBOUNDED,
+    },
+)
+
+/**
+ * The prompt apps under the beta developer mode Prompts row, as in the old app. The list loads
+ * only while the row is open.
+ */
+export const mobilePromptsEntity = defineSidebarEntity<Workflow>(
+    MOBILE_NAV_SCOPE_ID,
+    PROMPTS_ROW_KEY,
+    {
+        kind: "app",
+        icon: createElement(SquaresFourIcon, {size: 14}),
+        listAtom: promptWorkflowsListQueryStateAtom,
+        getLabel: (workflow) => workflow.name || workflow.slug || "Untitled prompt",
+        childPath: (workflow) => `/apps/${workflow.id}/playground`,
+        emptyLabel: "No prompts",
+        showAllPath: "/prompts",
     },
 )
 
@@ -151,7 +182,38 @@ export const useMobileNavItems = (projectURL: string): SidebarConfig[] => {
     const source = useMemo(() => withEntityGroups(rawSource, groups), [rawSource, groups])
     // Resolved ONCE for the rail, not once per row: the verbs do not differ by session.
     // Archiving or deleting the session on screen has to move you off it, from here too.
-    const chrome = useSessionRowChrome(useSessionActions({onRemoved: useLeaveSession(projectURL)}))
+    // Sharing: the owner's rail menu has Share; someone else's chat keeps only Open-like verbs.
+    const me = useAtomValue(userAtom)
+    const openShare = useSetAtom(shareDialogRequestAtom)
+    const onShare = useCallback(
+        (target: SessionActionTarget) => {
+            const [, , workspaceId = "", , projectId = ""] = projectURL.split("/")
+            openShare({
+                sessionId: target.sessionId,
+                sessionName: target.name ?? "",
+                workspaceId,
+                projectId,
+                agentId: target.appId,
+            })
+        },
+        [openShare, projectURL],
+    )
+    // "Copy share link" in the rail too (approved session row menu, QA D7): the session's own
+    // page, with the app's `/m` prefix.
+    const router = useRouter()
+    const sharePathFor = useCallback(
+        ({sessionId}: SessionActionTarget) =>
+            `${router.basePath}${sessionRoutePath(projectURL, sessionId)}`,
+        [projectURL, router.basePath],
+    )
+    const chrome = useSessionRowChrome(
+        useSessionActions({
+            onRemoved: useLeaveSession(projectURL),
+            currentUserId: me?.id ?? null,
+            onShare,
+            sharePathFor,
+        }),
+    )
     // Platform read in an effect: the server has none, and a guess mismatches on hydration.
     const mac = useIsMacPlatform()
     const paletteShortcut = useMemo(() => {
@@ -160,6 +222,8 @@ export const useMobileNavItems = (projectURL: string): SidebarConfig[] => {
             ? {faces: shortcutFaces(shortcut, mac), aria: shortcutAria(PALETTE_SHORTCUT_ID)}
             : undefined
     }, [mac])
+    const developerViews = useEnabledDeveloperViews()
+    const developerMode = useAtomValue(betaDeveloperModeActiveAtom)
     const wrapSessionRow = useCallback(
         (ref: SidebarEntityRef, node: ReactNode) =>
             createElement(SessionRowActions, {
@@ -170,6 +234,20 @@ export const useMobileNavItems = (projectURL: string): SidebarConfig[] => {
         [chrome],
     )
 
+    const promptsSource = useAtomValue(mobilePromptsEntity.activeSourceAtom)
+    const developerSlots = useMemo(
+        () =>
+            developerNavSlots(
+                projectURL,
+                developerViews,
+                developerMode,
+                developerMode
+                    ? resolveChildren(mobilePromptsEntity, promptsSource, projectURL)
+                    : [],
+            ),
+        [developerMode, developerViews, projectURL, promptsSource],
+    )
+
     return useMemo(
         () => [
             {
@@ -178,6 +256,7 @@ export const useMobileNavItems = (projectURL: string): SidebarConfig[] => {
                 icon: createElement(HouseIcon, {size: 16}),
                 link: `${projectURL}/apps`,
             },
+            ...developerSlots.afterHome,
             {
                 key: AGENTS_SIDEBAR_KEY,
                 title: "Agents",
@@ -204,7 +283,7 @@ export const useMobileNavItems = (projectURL: string): SidebarConfig[] => {
             {
                 key: SKILLS_SIDEBAR_KEY,
                 title: "Skills",
-                icon: createElement(GraduationCapIcon, {size: 16}),
+                icon: createElement(CompassIcon, {size: 16}),
                 link: `${projectURL}/skills`,
             },
             {
@@ -240,19 +319,9 @@ export const useMobileNavItems = (projectURL: string): SidebarConfig[] => {
                     wrapSessionRow,
                 ),
             },
-            // Observability is hidden from the rail for now; the screen and its route still work.
-            ...(SHOW_OBSERVABILITY
-                ? [
-                      {
-                          key: "mobile-observability",
-                          title: "Observability",
-                          icon: createElement(ChartLineUpIcon, {size: 16}),
-                          link: `${projectURL}/observability`,
-                      },
-                  ]
-                : []),
+            ...developerSlots.afterSessions,
         ],
-        [loadMoreSessions, source, projectURL, wrapSessionRow, paletteShortcut],
+        [loadMoreSessions, source, projectURL, wrapSessionRow, paletteShortcut, developerSlots],
     )
 }
 
@@ -262,13 +331,32 @@ const versionAtom = unwrap(atom(async () => (await import("../../../package.json
 
 export const useMobileVersion = () => useAtomValue(versionAtom)
 
-/** The pinned bottom entries: Templates and Settings, both dropped inside the settings scope. */
+/** Templates and Settings (not in the settings scope), plus Invite Teammate in beta developer mode. */
 export const useMobileBottomNavItems = (
     projectURL: string,
     {includeSettingsLink = true}: {includeSettingsLink?: boolean} = {},
 ): SidebarConfig[] => {
     const version = useMobileVersion()
-    return useMemo(
+    const developerMode = useAtomValue(betaDeveloperModeActiveAtom)
+    // No project id, no permission request: outside beta developer mode nothing is asked.
+    const [, , , , projectId = ""] = projectURL.split("/")
+    const canInvite = useProjectPermission(
+        developerMode ? projectId : "",
+        "add_new_user_to_workspace",
+    )
+    const inviteItems = useMemo(
+        () =>
+            developerMode && canInvite
+                ? [
+                      buildInviteTeammateNavItem({
+                          projectURL,
+                          icon: createElement(PaperPlaneIcon, {size: 16}),
+                      }),
+                  ]
+                : [],
+        [canInvite, developerMode, projectURL],
+    )
+    const items = useMemo(
         () =>
             // The settings scope drops them: the rail IS settings there.
             includeSettingsLink
@@ -295,6 +383,10 @@ export const useMobileBottomNavItems = (
                   ]
                 : [],
         [includeSettingsLink, projectURL, version],
+    )
+    return useMemo(
+        () => (inviteItems.length ? [...items, ...inviteItems] : items),
+        [inviteItems, items],
     )
 }
 

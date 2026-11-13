@@ -6,7 +6,7 @@
 import type {ComponentType, ReactNode} from "react"
 
 import {readMcpConnectionSlug} from "@agenta/entities/mcpEndpoint"
-import {GraduationCap, Plugs, Wrench} from "@phosphor-icons/react"
+import {Compass, HardDrives, Wrench} from "@phosphor-icons/react"
 
 import {McpServerFormView} from "../McpServerFormView"
 import {SkillFormView} from "../SkillFormView"
@@ -36,6 +36,9 @@ type ItemFormView = ComponentType<{
     /** Paint the empty required fields. Only the skill form reads it; the others ignore it. */
     showMissing?: boolean
 }>
+
+/** Inline skills are saved config, so the playground drawer offers them as a download. */
+const DownloadableSkillFormView: ItemFormView = (props) => <SkillFormView {...props} downloadable />
 
 export interface ItemKindDef {
     kind: ItemKind
@@ -110,7 +113,7 @@ export const ITEM_KINDS: Record<ItemKind, ItemKindDef> = {
     mcp: {
         kind: "mcp",
         field: "mcps",
-        icon: <Plugs size={16} />,
+        icon: <HardDrives size={16} />,
         noun: "server",
         emptyLabel: "No MCP servers yet",
         describe: describeMcp,
@@ -136,11 +139,11 @@ export const ITEM_KINDS: Record<ItemKind, ItemKindDef> = {
     skill: {
         kind: "skill",
         field: "skills",
-        icon: <GraduationCap size={16} />,
+        icon: <Compass size={16} />,
         noun: "skill",
         emptyLabel: "No skills yet",
         describe: describeSkill,
-        FormView: SkillFormView,
+        FormView: DownloadableSkillFormView,
         // Wider than the default 600 — the skill drawer is two-pane (Files + editor).
         drawerWidth: () => 760,
         drawerTitle: (draft) =>

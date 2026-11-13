@@ -1,6 +1,7 @@
 import {useCallback} from "react"
 
-import {AutomationDrawer, automationRunHistoryDrawerAtom} from "@agenta/automation-ui"
+import {automationRunHistoryDrawerAtom} from "@agenta/automation-ui/run-history-drawer-atom"
+import {ModelSetupBanner} from "@agenta/chat/components"
 import {configPanelCollapsedAtom} from "@agenta/chat/state"
 import type {TriggerOwnerRef} from "@agenta/entity-ui/drill-in"
 import {StorageFilesHeader, StorageSection} from "@agenta/entity-ui/drive"
@@ -12,9 +13,11 @@ import {Button, SimpleTooltip} from "@agenta/ui/ui"
 import {Sidebar} from "@phosphor-icons/react"
 import {useSetAtom} from "jotai"
 
-import {AutomationRunHistoryDrawerHost} from "../automations/AutomationRunHistoryDrawerHost"
+import {useProjectPermissionState} from "../context/useProjectPermission"
 
 import {DrillInBridgeProvider} from "./DrillInBridgeProvider"
+import {selectedRevisionAtomFamily} from "./selectedRevision"
+import {useOpenModelSetup} from "./useOpenModelSetup"
 
 /**
  * Build's left pane: the SHARED config panel under the SHARED "Configuration" header, with the
@@ -31,19 +34,23 @@ export const ConfigPane = ({
     entityId,
     sessionId,
     filesScope,
-    workspaceId,
     projectId,
 }: {
     entityId: string
     sessionId: string
     filesScope: string
-    workspaceId: string
     projectId: string
 }) => {
     const setConfigCollapsed = useSetAtom(configPanelCollapsedAtom)
+    const openModelSetup = useOpenModelSetup()
+    // A commit made here pins the new revision to this session.
+    const pinRevision = useSetAtom(selectedRevisionAtomFamily(sessionId))
     // A row's "Run history" opens in a drawer over the agent, like the automation editor does,
     // rather than navigating away from the conversation.
     const openDrawer = useSetAtom(automationRunHistoryDrawerAtom)
+    // The API refuses a Viewer's edits; this keeps the editor from offering them. The editor stays
+    // open while the check is in flight, so the people who may edit do not see it lock and unlock.
+    const editAccess = useProjectPermissionState(projectId, "edit_workflows")
     const openRunHistory = useCallback(
         ({id, kind}: TriggerOwnerRef) => {
             openDrawer({automationId: id, kind: kind === "schedule" ? "schedule" : "event"})
@@ -53,10 +60,20 @@ export const ConfigPane = ({
 
     return (
         <div className="ag-panel-raised ag-scroll-no-bar flex h-full min-h-0 w-full flex-col overflow-y-auto">
-            <DrillInBridgeProvider sessionId={sessionId} projectId={projectId}>
+            <DrillInBridgeProvider projectId={projectId} onWorkflowRevisionCommitted={pinRevision}>
                 <AgentBuildPanel
                     revisionId={entityId}
+                    disabled={!editAccess.pending && !editAccess.allowed}
                     stickyHeaderTop={48}
+                    banner={
+                        <div className="px-4">
+                            <ModelSetupBanner
+                                revisionId={entityId}
+                                layout="alert"
+                                onSetUp={openModelSetup}
+                            />
+                        </div>
+                    }
                     storage={
                         <StorageSection
                             revisionId={entityId}
@@ -71,17 +88,8 @@ export const ConfigPane = ({
                             scope={filesScope}
                         />
                     }
-                    // The same automations editor the /m screens render, so a schedule opened
-                    // from an agent's panel is the surface it is opened from anywhere else.
-                    automationDrawer={
-                        <>
-                            <AutomationDrawer />
-                            <AutomationRunHistoryDrawerHost
-                                workspaceId={workspaceId}
-                                projectId={projectId}
-                            />
-                        </>
-                    }
+                    // `SessionWorkspace` mounts the drawers: a linked one must open with this pane collapsed.
+                    automationDrawer={null}
                     onOpenRunHistory={openRunHistory}
                     header={
                         <AgentConfigHeader

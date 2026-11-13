@@ -17,7 +17,6 @@ import {
     type ComposerAttachment,
     type useComposerAttachments,
 } from "@agenta/chat/hooks"
-import {refusedSendRejections} from "@agenta/chat/model"
 import {dismissSoftKeyboardAfterSend} from "@agenta/ui/hooks"
 import type {RichChatInputHandle} from "@agenta/ui/rich-chat-input"
 import {HarnessTooltip, SelectLLMProviderBase} from "@agenta/ui/select-llm-provider"
@@ -27,6 +26,7 @@ import {AnimatePresence, motion} from "motion/react"
 import {ContentRail} from "@/components/ContentRail"
 import {useMotionPresets} from "@/lib/motion/presets"
 
+import {sendRefusalRejections} from "./sessionReadOnly"
 import {useComposerPrefill} from "./useComposerPrefill"
 
 /**
@@ -48,13 +48,16 @@ export const Composer = ({
     onSteer,
     onRefusedOverDraft,
     disabled = false,
+    sendDisabled = false,
     waitingOnUser = false,
     streaming = false,
     stopping = false,
     onStop,
     inputBusy = streaming,
     inputRef,
+    modelPickerRef,
     placeholder,
+    hasTurns,
     onNewSession,
 }: {
     /** The agent revision the `/` palette reads and writes (model, permissions, skills). */
@@ -77,6 +80,8 @@ export const Composer = ({
     onRefusedOverDraft?: (input: {text: string; parts?: FileUIPart[]}) => void
     /** No resolvable agent yet, or the screen is still hydrating. */
     disabled?: boolean
+    /** Typing stays on and Send is off: the agent's model needs setup. */
+    sendDisabled?: boolean
     /** The run is parked on the user (pending approval) — sends will queue. */
     waitingOnUser?: boolean
     /** A run is streaming from this device — the send button becomes Stop. */
@@ -87,8 +92,12 @@ export const Composer = ({
     inputBusy?: boolean
     /** Lets the host write into the input — a rewind puts the rewound message back to edit. */
     inputRef?: MutableRefObject<RichChatInputHandle | null>
+    /** Lets the host open the `/model` picker, as the low-credit strip's "Switch model" does. */
+    modelPickerRef?: MutableRefObject<(() => void) | null>
     /** Full placeholder override — used when the composer is gated (no model key). */
     placeholder?: string
+    /** The session already has turns: the key hints move from chips into the placeholder. */
+    hasTurns?: boolean
     /** Starts a fresh session — the palette offers no /new row without it. */
     onNewSession?: () => void
 }) => {
@@ -114,6 +123,14 @@ export const Composer = ({
             richInputRef.current?.blur()
         }, [richInputRef]),
     })
+    const openModelPicker = slash.openModelPicker
+    useEffect(() => {
+        if (!modelPickerRef) return
+        modelPickerRef.current = openModelPicker
+        return () => {
+            modelPickerRef.current = null
+        }
+    }, [modelPickerRef, openModelPicker])
     // Focus can only return AFTER the picker unmounts — a focus() in the handler is undone when
     // the still-focused panel leaves the DOM.
     const hadPickerRef = useRef(slash.picker)
@@ -163,7 +180,7 @@ export const Composer = ({
         // Enter and the send button (and a voice take completing) can all fire while an upload
         // is still in flight; a second pass would re-send the same staged tray. Returning false
         // synchronously keeps the text in the editor.
-        if (sending.current) {
+        if (sendDisabled || sending.current) {
             if (extraFiles.length) attachments.addFiles(extraFiles)
             return false
         }
@@ -226,7 +243,7 @@ export const Composer = ({
             // composer's own inline channel. `outbound`, not `staged`: a voice take never sat in
             // the tray, and restoring it there is what makes it retryable. Idempotent: a throw
             // before the clear leaves the tray as it was.
-            attachments.setRejections(refusedSendRejections(error))
+            attachments.setRejections(sendRefusalRejections(error))
             // Never over a draft typed while this send was pending: the host keeps it instead.
             if (cleared && !canRestoreRefusedSend(richInputRef.current)) {
                 onRefusedOverDraft?.({text, parts})
@@ -367,10 +384,12 @@ export const Composer = ({
                             onChange={draft.handleComposerChange}
                             slashCommands={slash.sections}
                             disabled={disabled}
+                            sendDisabled={sendDisabled}
                             composerDisabled={disabled}
                             dictating={dictating}
                             dictationAnalyserRef={voice.dictationAnalyserRef}
                             placeholder={placeholder}
+                            hasTurns={hasTurns}
                             waitingOnUser={waitingOnUser}
                             streaming={stoppable}
                             stopping={stopping}

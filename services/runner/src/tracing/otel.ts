@@ -62,6 +62,7 @@ import type {
   EmitEvent,
   ModelTokenUsage,
 } from "../protocol.ts";
+import { acpToolName } from "../acp-tool-name.ts";
 import type { Redactor } from "../redaction.ts";
 import { configuredApiBase, envApiUrl } from "../apiBase.ts";
 import { logExportProblem } from "./export-diagnostics.ts";
@@ -1974,6 +1975,8 @@ export interface SandboxAgentOtel {
   ): void;
   /** Snapshot the ids whose tool calls have no terminal result yet. */
   openToolCallIds(): string[];
+  /** Whether `settleOpenToolCalls` already closed this tool-call id. */
+  wasForceSettled(toolCallId: string): boolean;
   /**
    * Mark a tool-call id as DENIED (the runner replied `reject` to its gate). Its closing failed
    * result then carries `denied: true` so the egress projects `tool-output-denied` (a decline)
@@ -2375,7 +2378,8 @@ export function createSandboxAgentOtel(
       // clean across text -> tool -> text interleaving). No-op on the one-shot path.
       closeText();
       closeReasoning();
-      const name = update.title || update.kind || "tool";
+      const name =
+        acpToolName(update) || update.title || update.kind || "tool";
       let span: Span | undefined;
       if (emitSpans && turnCtx) {
         span = tracer.startSpan(`execute_tool ${name}`, undefined, turnCtx);
@@ -2499,6 +2503,8 @@ export function createSandboxAgentOtel(
     if (toolCallId) deniedToolCallIds.add(toolCallId);
   }
 
+  // A call closed here may still reach a park seam a moment later; see `wasForceSettled`.
+  const forceSettledToolCallIds = new Set<string>();
   function settleOpenToolCalls(
     isExcluded: (id: string) => boolean,
     message: string,
@@ -2510,6 +2516,7 @@ export function createSandboxAgentOtel(
         entry.span.end();
       }
       toolSpans.delete(id);
+      forceSettledToolCallIds.add(id);
       record({ type: "tool_result", id, output: message, isError: true });
     }
   }
@@ -2681,6 +2688,7 @@ export function createSandboxAgentOtel(
     events: () => events,
     settleOpenToolCalls,
     openToolCallIds: () => [...toolSpans.keys()],
+    wasForceSettled: (toolCallId) => forceSettledToolCallIds.has(toolCallId),
     markToolCallDenied,
     usage: () => usage,
   };

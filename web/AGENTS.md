@@ -7,6 +7,9 @@ edit, run, or copy from them. The one exception is the theme source in
 `web/oss/src/styles/theme/` (see below). This file loads when you work in the frontend. The
 repo-wide root conventions live in `/AGENTS.md`.
 
+Exception (M3 sharing): `/w` sends `visibility: "project"` on new chats and agents. Do not add
+other `/w` edits.
+
 For deep `@agenta/*` package reference (package vs app placement, molecules, bridges, the
 EntityPicker, package unit tests), use the **`agenta-package-practices`** skill. It holds
 the detail this file only summarizes.
@@ -422,6 +425,7 @@ the source of truth for this area. Load it when you:
   antd-style call sites; never raw antd `Modal`).
 - Use entity state (molecules), the loadable/runnable bridges, or the `EntityPicker`.
 - Write package unit tests (they live in `tests/unit/`, not `src/`).
+- Decide what to test or review tests: load the **`test-design`** skill (risk list, how to write each test, mutation check).
 
 Quick placement heuristic:
 

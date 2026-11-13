@@ -2,7 +2,9 @@ import {AgentActionsMenu, AgentChip} from "@agenta/entity-ui/agent"
 import {InlineRenameInput} from "@agenta/sessions-ui"
 
 import {lastActiveLabel, NO_DESCRIPTION, type AgentListRow} from "./agentListView"
+import {AgentPrivateMarker} from "./AgentPrivateMarker"
 import {AGENT_RENAME_INPUT_CLASS, useAgentInlineRename} from "./useAgentInlineRename"
+import {agentMenuProps, type AgentRowActions} from "./useAgentRowActions"
 
 /**
  * One agent's cells, in column order.
@@ -14,12 +16,14 @@ export const AgentRowCells = ({
     row,
     narrow,
     onOpen,
+    actions,
 }: {
     row: AgentListRow
-    /** A phone has no Created by column; the cell is dropped, not hidden. */
+    /** A phone has no Owner column; the cell is dropped, not hidden. */
     narrow: boolean
     /** The row's own click already does this; the menu offers it in words. */
     onOpen: (row: AgentListRow) => void
+    actions: AgentRowActions
 }) => {
     const {rename, startFromMenu, handleCloseAutoFocus} = useAgentInlineRename(row)
 
@@ -56,6 +60,7 @@ export const AgentRowCells = ({
                             >
                                 {row.name}
                             </span>
+                            {row.isPrivate ? <AgentPrivateMarker /> : null}
                             {/* The same badge a card carries: without it the Status facet
                                 narrows the list to rows that say nothing about why. */}
                             {row.waiting > 0 ? (
@@ -104,6 +109,7 @@ export const AgentRowCells = ({
                     onOpen={() => onOpen(row)}
                     onRename={startFromMenu}
                     onCloseAutoFocus={handleCloseAutoFocus}
+                    {...agentMenuProps(row, actions)}
                 />
             </span>
         </>

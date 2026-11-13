@@ -208,10 +208,9 @@ export async function completeOidcSignIn(): Promise<OidcCallbackOutcome> {
 /**
  * The signed-in session's access token, or `null` when there is no session.
  *
- * Callers that need to send an explicit `Authorization` header rather than rely on the cookie —
- * the playground's run requests are the case that matters, because the backend only honours the
- * `project_id` query param alongside an Authorization header, and without it a run resolves
- * against the caller's DEFAULT project instead of the one it belongs to.
+ * For callers that send an explicit `Authorization` header rather than rely on the cookie (the
+ * playground's run requests). The project rides the `project_id` query param either way: the API
+ * honours it for a cookie session too.
  */
 export async function getAccessToken(): Promise<string | null> {
     if (typeof window === "undefined") return null
@@ -320,6 +319,31 @@ export async function signUpDetailed(
     } catch (error) {
         const rejection = await readAuthRejection(error)
         if (rejection) return {kind: "not-allowed", message: rejection}
+        return {kind: "error"}
+    }
+}
+
+/* ── password reset (the link carries the token; SuperTokens reads it from the URL) ── */
+
+export type ResetPasswordOutcome =
+    | {kind: "ok"}
+    | {kind: "invalid-link"}
+    | {kind: "field-error"; message: string}
+    | {kind: "error"}
+
+export async function submitNewPasswordDetailed(password: string): Promise<ResetPasswordOutcome> {
+    ensureAuthInit()
+    try {
+        const response = await EmailPassword.submitNewPassword({
+            formFields: [{id: "password", value: password}],
+        })
+        if (response.status === "OK") return {kind: "ok"}
+        if (response.status === "RESET_PASSWORD_INVALID_TOKEN_ERROR") return {kind: "invalid-link"}
+        return {
+            kind: "field-error",
+            message: response.formFields[0]?.error ?? "Choose a different password.",
+        }
+    } catch {
         return {kind: "error"}
     }
 }

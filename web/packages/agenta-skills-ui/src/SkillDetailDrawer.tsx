@@ -5,8 +5,7 @@
  * - Editable as soon as the head loads, always showing the head. Revision history is
  *   deliberately not surfaced: versioning stays under the hood.
  * - Discard / Save sit in the footer throughout, inert until the draft differs from the
- *   head; Save opens the blast-radius dialog (5b) — the explicit replacement for silent
- *   auto-commit — then commits.
+ *   head; Save commits the draft directly.
  * - Who runs it reads as a faded count in the header; the names wait behind a hover, each
  *   a link to its agent. The skill's own verbs — Add to agent, Archive / Restore — live in
  *   the header's kebab.
@@ -17,7 +16,7 @@
 import {useCallback, useMemo, useRef, useState} from "react"
 
 import {AgentChip} from "@agenta/entity-ui/agent"
-import {SkillFormView} from "@agenta/entity-ui/drill-in"
+import {SkillFormSkeleton, SkillFormView} from "@agenta/entity-ui/drill-in"
 import {
     archiveSkill,
     commitSkillRevision,
@@ -28,6 +27,7 @@ import {
     type SkillRevision,
 } from "@agenta/skills"
 import {invalidateSkillsListCache} from "@agenta/skills/state"
+import {SkillMark} from "@agenta/ui/agent-icon"
 import {EnhancedDrawer} from "@agenta/ui/drawer"
 import {cn} from "@agenta/ui/styles"
 import {
@@ -40,11 +40,6 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
     Button,
-    Dialog,
-    DialogContent,
-    DialogHeader,
-    DialogTitle,
-    Input,
     Popover,
     PopoverAnchor,
     PopoverContent,
@@ -68,8 +63,12 @@ import {useQuery} from "@tanstack/react-query"
 import Link from "next/link"
 
 import {SkillAgentPicker, skillUsageQueryKey} from "./SkillAgentPicker"
-import {SkillSaveBlastRadius} from "./SkillSaveBlastRadius"
+import {skillTitle} from "./skillTitle"
 import type {SkillListItem, SkillUsageRef} from "./types"
+
+/** The head-revision query's key; the registry row's Download reads the same cache. */
+export const skillRevisionsQueryKey = (projectId: string, workflowId: string) =>
+    ["skills", "revisions", projectId, workflowId] as const
 
 export interface SkillDetailDrawerProps {
     open: boolean
@@ -112,7 +111,7 @@ export function SkillDetailDrawer({
     const isBuiltin = skill?.origin === "builtin"
 
     const revisionsQuery = useQuery({
-        queryKey: ["skills", "revisions", projectId, workflowId],
+        queryKey: skillRevisionsQueryKey(projectId, workflowId),
         queryFn: () => fetchSkillRevisions({projectId, workflowId}),
         enabled: open && Boolean(projectId && workflowId) && !isBuiltin,
         staleTime: 15_000,
@@ -138,10 +137,6 @@ export function SkillDetailDrawer({
         [usageQuery.data],
     )
     const [draft, setDraft] = useState<Record<string, unknown>>({})
-    const [saveOpen, setSaveOpen] = useState(false)
-    const [saveMessage, setSaveMessage] = useState("")
-    /** What the pending commit contains: the edited draft, or an older revision's content. */
-    const [pending, setPending] = useState<Record<string, unknown> | null>(null)
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState<string | null>(null)
 
@@ -199,9 +194,6 @@ export function SkillDetailDrawer({
         if (open) {
             setEditBaseId(null)
             setAttempted(false)
-            setSaveOpen(false)
-            setSaveMessage("")
-            setPending(null)
             setError(null)
             setArchiveOpen(false)
             setDiscardOpen(false)
@@ -238,35 +230,32 @@ export function SkillDetailDrawer({
         onClose()
     }, [discard, onClose])
 
-    const askToCommit = useCallback((content: Record<string, unknown>, defaultMessage: string) => {
+    const save = useCallback(async () => {
+        if (!head) return
         setAttempted(true)
-        const parsed = skillContentSchema.safeParse(content)
+        const parsed = skillContentSchema.safeParse(draft)
         // The fields say what is missing or malformed; the footer keeps to what the server said.
         if (!parsed.success) return
-        setPending(parsed.data)
-        setSaveMessage(defaultMessage)
-        setError(null)
-        setSaveOpen(true)
-    }, [])
-
-    const commit = useCallback(async () => {
-        if (!pending || !head) return
         setBusy(true)
         setError(null)
         try {
-            await commitSkillRevision({
+            const committed = await commitSkillRevision({
                 projectId,
                 workflowId,
-                skill: pending,
-                message: saveMessage.trim() || undefined,
+                skill: parsed.data,
                 // The revision this edit started from; a commit landed meanwhile
                 // conflicts instead of silently overwriting it.
                 baseRevisionId: editBaseId ?? head.id,
             })
             invalidateSkillsListCache()
-            await revisionsQuery.refetch()
-            setSaveOpen(false)
-            setPending(null)
+            const refreshed = await revisionsQuery.refetch()
+            // A stale head would reseed the draft over the saved edit.
+            if (refreshed.isError) {
+                // The next save builds on this one, not on the head the drawer still shows.
+                if (committed.revision_id) setEditBaseId(committed.revision_id)
+                setError("Saved, but the latest version could not load. Reopen the skill.")
+                return
+            }
             // Clearing the base reseeds the draft from the head the refetch just brought.
             setEditBaseId(null)
         } catch (err) {
@@ -278,7 +267,7 @@ export function SkillDetailDrawer({
         } finally {
             setBusy(false)
         }
-    }, [editBaseId, head, pending, projectId, revisionsQuery, saveMessage, workflowId])
+    }, [draft, editBaseId, head, projectId, revisionsQuery, workflowId])
 
     // Read-only where there is nothing to write to: a built-in, or a skill that is put away.
     const readOnly = isBuiltin || Boolean(skill?.archived)
@@ -487,8 +476,9 @@ export function SkillDetailDrawer({
 
     const title = (
         <div className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 truncate font-mono text-sm font-medium">
-                {skill?.slug ?? ""}
+            <SkillMark size={24} />
+            <span className="min-w-0 truncate text-sm font-medium">
+                {skill ? skillTitle(skill) : ""}
             </span>
             {provenance}
             {usage}
@@ -516,6 +506,11 @@ export function SkillDetailDrawer({
                 placement="right"
                 width={width}
                 destroyOnClose
+                bodyFallback={
+                    <div className="flex min-h-0 flex-1 flex-col p-4">
+                        <SkillFormSkeleton />
+                    </div>
+                }
                 title={title}
                 extra={actions}
                 styles={{
@@ -565,10 +560,8 @@ export function SkillDetailDrawer({
                                     >
                                         Discard
                                     </Button>
-                                    <Button
-                                        onClick={() => askToCommit(draft, "")}
-                                        disabled={busy || !dirty}
-                                    >
+                                    <Button onClick={() => void save()} disabled={busy || !dirty}>
+                                        {busy ? <Spinner size="small" /> : null}
                                         Save changes
                                     </Button>
                                 </>
@@ -580,7 +573,7 @@ export function SkillDetailDrawer({
                 <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-4">
                     {isBuiltin ? (
                         <div className="flex flex-col gap-2 rounded-md border border-solid border-[var(--ag-colorBorderSecondary)] bg-[var(--ag-colorFillQuaternary)] p-4 text-xs">
-                            <span className="font-mono font-medium">{skill?.slug}</span>
+                            <span className="font-medium">{skill ? skillTitle(skill) : ""}</span>
                             <span className="text-[var(--ag-colorTextSecondary)]">
                                 {skill?.description || "No description."}
                             </span>
@@ -589,9 +582,7 @@ export function SkillDetailDrawer({
                             </span>
                         </div>
                     ) : revisionsQuery.isPending ? (
-                        <div className="flex flex-1 items-center justify-center">
-                            <Spinner size="small" />
-                        </div>
+                        <SkillFormSkeleton />
                     ) : revisionsQuery.isError ? (
                         // A failed load must not read as an empty skill with a dead Save.
                         <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
@@ -615,6 +606,7 @@ export function SkillDetailDrawer({
                                 onChange={readOnly ? () => undefined : setDraft}
                                 disabled={readOnly || busy}
                                 showMissing={attempted}
+                                downloadable
                             />
                         </div>
                     )}
@@ -636,7 +628,9 @@ export function SkillDetailDrawer({
                     }}
                 >
                     <AlertDialogHeader>
-                        <AlertDialogTitle>Archive {skill?.slug}?</AlertDialogTitle>
+                        <AlertDialogTitle>
+                            Archive {skill ? skillTitle(skill) : "skill"}?
+                        </AlertDialogTitle>
                         <AlertDialogDescription>
                             The skill leaves the registry and agents can no longer run it. Its name
                             stays reserved, and restoring it brings back its full history.
@@ -714,49 +708,6 @@ export function SkillDetailDrawer({
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>
-
-            {/* Radix Dialog, not EnhancedModal: /m renders this drawer and antd is banned there. */}
-            <Dialog
-                open={saveOpen}
-                onOpenChange={(next) => {
-                    if (!next && !busy) setSaveOpen(false)
-                }}
-            >
-                <DialogContent className="sm:max-w-[520px]">
-                    <DialogHeader>
-                        <DialogTitle>Save changes</DialogTitle>
-                    </DialogHeader>
-                    <div className="flex flex-col gap-3">
-                        <SkillSaveBlastRadius usedBy={usedBy} />
-                        <Input
-                            value={saveMessage}
-                            onChange={(e) => setSaveMessage(e.target.value)}
-                            placeholder="What changed? (commit message)"
-                            aria-label="Commit message"
-                            disabled={busy}
-                        />
-                        {error ? (
-                            <span className="flex items-start gap-1.5 text-xs text-[var(--ag-colorError)]">
-                                <WarningCircle size={14} className="mt-px shrink-0" />
-                                <span className="min-w-0">{error}</span>
-                            </span>
-                        ) : null}
-                        <div className="flex items-center justify-end gap-2">
-                            <Button
-                                variant="outline"
-                                onClick={() => setSaveOpen(false)}
-                                disabled={busy}
-                            >
-                                Cancel
-                            </Button>
-                            <Button onClick={() => void commit()} disabled={busy}>
-                                {busy ? <Spinner size="small" /> : null}
-                                Save
-                            </Button>
-                        </div>
-                    </div>
-                </DialogContent>
-            </Dialog>
         </>
     )
 }

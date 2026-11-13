@@ -6,26 +6,30 @@ import {
     shouldShowStopControl,
     restoreRefusedSend as restoreRefusedSendInto,
 } from "@agenta/chat/assets"
-import {getPendingSecretInteractions} from "@agenta/chat/clientTools"
 import {
     ConnectionDock,
     ConnectionFocusProvider,
     ConnectionWarningStrip,
     ElicitationDock,
+    ModelSetupBanner,
     QueuedMessagesDock,
 } from "@agenta/chat/components"
 import type {QueuedMessage} from "@agenta/chat/hooks"
 import {
     useAgentConversation,
     useAgentModelKeyStatus,
+    useAgentModelSetup,
     useConnectionDock,
     useElicitationDock,
+    useSecretDock,
     useComposerAttachments,
 } from "@agenta/chat/hooks"
 import {
     getInteractionAvailability,
     getLivePendingApprovals,
     isSessionTurnStopping,
+    refusedSendReason,
+    SendRefusedError,
     type TurnViewModel,
 } from "@agenta/chat/model"
 import {getSessionTurnId} from "@agenta/chat/state"
@@ -38,11 +42,12 @@ import {
 } from "@agenta/entities/session"
 import {
     invalidateAgentCommittedRevisionCache,
+    MODEL_SETUP_PLACEHOLDER,
     workflowBuildKitOverlayReadyAtomFamily,
 } from "@agenta/entities/workflow"
 import {AgentIntroCard} from "@agenta/entity-ui/agent"
 import {SecretRequestDock} from "@agenta/entity-ui/clientTools"
-import {AgentSetupCard} from "@agenta/entity-ui/onboarding"
+import {PersonalAccountsCard} from "@agenta/entity-ui/onboarding"
 import {isOnScreen, isOverlayOpen} from "@agenta/shared/utils"
 import {message, modal} from "@agenta/ui/app-message"
 import {ChatBubble} from "@agenta/ui/components/presentational"
@@ -51,16 +56,23 @@ import type {RichChatInputHandle} from "@agenta/ui/rich-chat-input"
 import {isAltChord} from "@agenta/ui/shortcuts"
 import {Button} from "@agenta/ui/ui"
 import {useQueryClient} from "@tanstack/react-query"
+import type {FileUIPart} from "ai"
 import {useAtomValue, useSetAtom, useStore} from "jotai"
 
 import {ContentRail} from "@/components/ContentRail"
 import {ScreenScaffold} from "@/components/ScreenScaffold"
 
 import {useProjectPermission} from "../context/useProjectPermission"
-import {failPendingTaskAtom, pendingTasksAtom, sendPendingTaskAtom} from "../home/pendingTask"
+import {
+    failPendingTaskAtom,
+    keepFailedSendAtom,
+    pendingTasksAtom,
+    sendPendingTaskAtom,
+} from "../home/pendingTask"
 import {AppShell} from "../nav/AppShell"
 import {livenessQueryKey, useLivenessUpdatedAt} from "../sessions/useLivenessPoll"
-import {useWalletSummary} from "../wallet/useWalletSummary"
+import {CreditAlertStrip} from "../wallet/CreditAlertStrip"
+import {useWalletSummary, walletSummaryKey} from "../wallet/useWalletSummary"
 
 import {ApprovalDock} from "./ApprovalDock"
 import {waitForBuildKit} from "./buildKitWait"
@@ -70,7 +82,10 @@ import {Composer} from "./Composer"
 import {ConnectModelStrip} from "./ConnectModelStrip"
 import {hasUnsavedConfigEdits} from "./hasUnsavedConfigEdits"
 import {MODEL_KEY_WAIT_LIMIT_MS, pendingTaskDecision} from "./pendingTaskPolicy"
+import {ReadOnlyComposerNotice} from "./ReadOnlyComposerNotice"
 import {heldCommitAtomFamily, selectedRevisionAtomFamily} from "./selectedRevision"
+import type {SessionReadOnly} from "./sessionReadOnly"
+import {refreshOnSetupFailure} from "./setupFailureRefresh"
 import {ChatLoading} from "./states/ChatStates"
 import {PendingTaskError} from "./states/PendingTaskError"
 import {cancelledStopAction} from "./stopHereState"
@@ -79,7 +94,8 @@ import {mobileTurnRowClass} from "./turnRowClass"
 import {mergeAssistantRuns} from "./turnRuns"
 import {deriveMobileRemoteTurnPresentation, showTrailingWorkingPulse} from "./turnStatus"
 import {useApprovalActions, type ApprovalActions} from "./useApprovalActions"
-import {useSessionSetupStep} from "./useSessionSetupStep"
+import {useOpenModelSetup} from "./useOpenModelSetup"
+import {usePersonalSetupStep} from "./usePersonalSetupStep"
 import {useSessionWatch} from "./useSessionWatch"
 import {useStartBlankSession} from "./useStartBlankSession"
 import {useTranscriptAutoScroll} from "./useTranscriptAutoScroll"
@@ -112,6 +128,9 @@ export const LiveConversation = ({
     stoppingTurnId,
     sharedReader,
     agentId,
+    readOnly = null,
+    canSend = true,
+    accessPending = false,
     embedded = false,
 }: {
     entityId: string
@@ -129,6 +148,15 @@ export const LiveConversation = ({
     /** React Query timestamp used to reject the sender's stale post-settle liveness snapshot. */
     /** Scopes the session tab rail to this agent's sessions. */
     agentId?: string | null
+    /** The reader cannot send (`!sharing.can_send`): a notice takes the composer's place. */
+    readOnly?: SessionReadOnly | null
+    /**
+     * The reader may write here. False while read-only and while the sharing state is not known
+     * yet: every control that sends, approves, answers or re-runs is off, shortcuts included.
+     */
+    canSend?: boolean
+    /** The session row read has not answered yet. */
+    accessPending?: boolean
     /** Rendered inside a workspace pane — the shell and its rail belong to the parent. */
     embedded?: boolean
 }) => {
@@ -140,6 +168,7 @@ export const LiveConversation = ({
     // the composer, rewind (far below) refills it the same way, and a refused send comes back
     // through it too.
     const composerRef = useRef<RichChatInputHandle | null>(null)
+    const modelPickerRef = useRef<(() => void) | null>(null)
     // Quote-to-reply anchors its pill and note box inside the transcript rail.
     const quoteRootRef = useRef<HTMLDivElement>(null)
     // The composer's tray, owned here for the same reason: a refusal that arrives after the send
@@ -168,6 +197,35 @@ export const LiveConversation = ({
     const registerLocalSession = useSetAtom(registerLocalSessionAtom)
     const markLocalSessionAccepted = useSetAtom(markLocalSessionAcceptedAtom)
     const dropUnacceptedLocalSession = useSetAtom(dropUnacceptedLocalSessionAtom)
+    // A send outlives this screen. One that fails after the user left has no composer to go back
+    // to, so its session stays listed and the message waits as a failed task for their return.
+    const keepFailedSend = useSetAtom(keepFailedSendAtom)
+    const onScreenRef = useRef(false)
+    useEffect(() => {
+        onScreenRef.current = true
+        return () => {
+            onScreenRef.current = false
+        }
+    }, [])
+    const sendFailed = useCallback(
+        (message: {text: string; fileParts?: FileUIPart[]}, error?: unknown) => {
+            refreshOnSetupFailure(error instanceof SendRefusedError ? error.refusalCode : null)
+            if (onScreenRef.current) {
+                dropUnacceptedLocalSession(sessionId)
+                return
+            }
+            keepFailedSend({
+                sessionId,
+                task: {
+                    agentId: agentId ?? entityId,
+                    text: message.text,
+                    parts: message.fileParts,
+                    failureReason: refusedSendReason(error) ?? undefined,
+                },
+            })
+        },
+        [agentId, dropUnacceptedLocalSession, entityId, keepFailedSend, sessionId],
+    )
     const followCommitRef = useRef<(revisionId: string) => void>(() => undefined)
     const conversation = useAgentConversation({
         entityId,
@@ -178,7 +236,7 @@ export const LiveConversation = ({
         sharedReaderLivenessUpdatedAt: livenessUpdatedAt,
         restoreRefusedSend,
         onSendAccepted: () => markLocalSessionAccepted(sessionId),
-        onSendFailed: () => dropUnacceptedLocalSession(sessionId),
+        onSendFailed: sendFailed,
     })
     const canEditSecrets = useProjectPermission(projectId, "edit_secret")
     const store = useStore()
@@ -191,20 +249,15 @@ export const LiveConversation = ({
         },
         [adoptRevision, pinRevision],
     )
-    const pendingSecret = useMemo(
-        () => getPendingSecretInteractions(conversation.messages)[0],
-        [conversation.messages],
-    )
-
     // The agent committing itself in THIS session: follow it — pin the workspace and retarget the
     // next send — and drop the latest-revision caches, or the pane and the chip keep the revision
     // it replaced. A durable send learns it from the records reader; a `useChat` stream carries a
     // `data-committed-revision` part. The follower acts once per commit, and holds a commit that
     // lands while the tab is hidden until the tab is visible again. Commits made elsewhere (another
-    // user, another session) never come through here: the version pill offers those.
+    // user, another session) never come through here: the top bar applies those.
     const applyCommitRef = useRef<(revisionId: string) => void>(() => undefined)
     applyCommitRef.current = (revisionId: string) => {
-        invalidateAgentCommittedRevisionCache()
+        invalidateAgentCommittedRevisionCache(agentId)
         if (revisionId === entityId) return
         // Unsaved edits in the config pane belong to the pinned revision. Switching now would drop
         // them, so the version pill offers the commit instead.
@@ -241,12 +294,18 @@ export const LiveConversation = ({
     // Wallet credits fund runs without a key, and an unanswered wallet is not "no credits".
     const walletPending = modelKey.gateActive && wallet.isLoading
     const modelBlocked = modelKey.gateActive && !hasCredits && !wallet.isLoading
-    // The strip stays hidden until the vault and wallet answer, but the parked task must NOT go
-    // out on that same unknown — see `pendingTaskPolicy`.
-    const modelKeyLoading = modelKey.loading || walletPending
+    // The server's needs-setup check: a model item that needs setup turns Send off, not typing.
+    // Subscribed here so the check starts with the screen's other requests.
+    const modelSetup = useAgentModelSetup(entityId)
+    const setupBlocked = modelSetup.blocked && !modelBlocked
+    const openModelSetup = useOpenModelSetup()
+    // The strips stay hidden until the vault, the wallet and the needs-setup check answer, but the
+    // parked task must NOT go out on that same unknown — see `pendingTaskPolicy`.
+    const modelKeyLoading = modelKey.loading || walletPending || modelSetup.loading
 
-    // The vault wait is bounded (`pendingTaskPolicy`). This stays 0 while the wait is on and
-    // becomes the elapsed time when the deadline fires, which is the render that releases the task.
+    // The wait for the vault, the wallet and the needs-setup check is bounded (`pendingTaskPolicy`).
+    // This stays 0 while the wait is on and becomes the elapsed time when the deadline fires, which
+    // is the render that releases the task.
     const modelKeyWaitStartRef = useRef<number | null>(null)
     const [modelKeyWaitedMs, setModelKeyWaitedMs] = useState(0)
     useEffect(() => {
@@ -282,7 +341,19 @@ export const LiveConversation = ({
     // Landing on a session — a new one from `+` or the shortcut, or a switch to an existing one —
     // puts the caret in the composer, once it can take input. Not while the caret is already in
     // some other field: a self-commit remounts this screen mid-edit in the config pane.
-    const disabled = conversation.isHydrating || modelBlocked || walletPending
+    // One gate for every write on this screen.
+    const locked = !canSend || Boolean(readOnly)
+    // Access can go while a confirm dialog is open: late callbacks read the gate as it is now.
+    const lockedRef = useRef(locked)
+    lockedRef.current = locked
+    // A screen that is gone (the chat was taken away) answers every late callback as locked.
+    useEffect(() => {
+        lockedRef.current = locked
+        return () => {
+            lockedRef.current = true
+        }
+    }, [locked])
+    const disabled = conversation.isHydrating || modelBlocked || walletPending || locked
     useEffect(() => {
         if (disabled) return
         const frame = requestAnimationFrame(() => {
@@ -333,36 +404,33 @@ export const LiveConversation = ({
                 await sendToConversation(input)
             } catch (error) {
                 // The durable path reports this through `onSendFailed` too; this covers the rest.
-                dropUnacceptedLocalSession(sessionId)
+                sendFailed({text: input.text, fileParts: input.parts}, error)
                 throw error
             }
         },
         [
             agentId,
             buildKitReadyAtom,
-            dropUnacceptedLocalSession,
             firstTurn,
             projectId,
             registerLocalSession,
+            sendFailed,
             sendToConversation,
             sessionId,
             store,
         ],
     )
-    // A template create asks for its accounts here, on arrival, instead of on a create surface of
-    // its own. Holds the first message while it does; declines silently when there is nothing to
-    // ask, which is every other way into this screen.
-    const setup = useSessionSetupStep(sessionId)
+    // The viewer's own missing "user" items. Optional: it never holds a message.
+    const personalSetup = usePersonalSetupStep(sessionId, entityId)
     useEffect(() => {
-        if (!pendingTask || pendingTask.delivery) return
+        if (!pendingTask || pendingTask.delivery || locked) return
         const decision = pendingTaskDecision({
             sessionId,
             sentFor: null,
             hydrating: isHydrating,
             modelKeyLoading,
             modelKeyWaitedMs,
-            modelBlocked,
-            setupBlocking: setup.blocking,
+            modelBlocked: modelBlocked || setupBlocked,
         })
         if (decision === "hold") return
         if (decision === "abandon") {
@@ -379,20 +447,31 @@ export const LiveConversation = ({
         modelKeyLoading,
         modelKeyWaitedMs,
         modelBlocked,
-        setup.blocking,
+        setupBlocked,
         send,
         sessionId,
         sendPendingTask,
         failPendingTask,
+        locked,
     ])
 
     const queryClient = useQueryClient()
     useEffect(() => {
         if (conversation.sharedSettledAt) {
             void queryClient.invalidateQueries({queryKey: livenessQueryKey(projectId)})
+            // A turn from another device can settle between polls without `inputBusy` flipping.
+            void queryClient.invalidateQueries({queryKey: walletSummaryKey(projectId)})
         }
     }, [conversation.sharedSettledAt, projectId, queryClient])
     const streamingHere = conversation.status === "submitted" || conversation.status === "streaming"
+    // The chat reads the wallet unpolled, so a finished turn is what refreshes its balance.
+    const turnRunning = streamingHere || conversation.inputBusy
+    const turnWasRunningRef = useRef(turnRunning)
+    useEffect(() => {
+        if (turnWasRunningRef.current && !turnRunning)
+            void queryClient.invalidateQueries({queryKey: walletSummaryKey(projectId)})
+        turnWasRunningRef.current = turnRunning
+    }, [turnRunning, projectId, queryClient])
     const remoteTurn = deriveMobileRemoteTurnPresentation({
         livenessRunning: running,
         livenessUpdatedAt,
@@ -405,8 +484,12 @@ export const LiveConversation = ({
     // `sendInFlight` covers the gap the other two cannot: the message has left the composer, and
     // neither `useChat` (the server-owned path never moves its status) nor liveness (a poll away)
     // knows yet. Without it the pulse arrived a runner accept plus a poll after the send (#6778).
+    // `inputBusy`: the server's execution state, the same signal as the composer's ring.
     const showingTurnActivity =
-        streamingHere || conversation.sendInFlight || remoteTurn.showActivity
+        streamingHere ||
+        conversation.sendInFlight ||
+        conversation.inputBusy ||
+        remoteTurn.showActivity
     const streamingHereRef = useRef(streamingHere)
     streamingHereRef.current = streamingHere
     const hitlPendingRef = useRef(conversation.hitlPending)
@@ -642,15 +725,18 @@ export const LiveConversation = ({
                       : steerActions.phase,
             errorText: conversation.approvals.errorText ?? steerActions.errorText,
             respond: ({approved, message, approvalId}) => {
+                if (locked) return
                 if (message) {
                     steerActions.respond({approvalId, approved, message})
                     return
                 }
                 conversation.approvals.respond(approved)
             },
-            approveAll: () => conversation.approvals.approveAll(),
+            approveAll: () => {
+                if (!locked) conversation.approvals.approveAll()
+            },
         }),
-        [conversation.approvals, steerActions],
+        [conversation.approvals, locked, steerActions],
     )
 
     // The auto-scroll effect keys on IDENTITY, so a fresh array every render would re-pin the
@@ -668,28 +754,55 @@ export const LiveConversation = ({
     // rows are passive markers.
     const elicits = useElicitationDock({
         messages: conversation.messages,
-        enabled: interactionAvailability.parkedDocks,
+        enabled: interactionAvailability.parkedDocks && !locked,
         approvalsPending: approvalsOpen,
         onOutput: conversation.sendToolOutput,
     })
     const connects = useConnectionDock({
         messages: conversation.messages,
-        enabled: interactionAvailability.parkedDocks,
+        enabled: interactionAvailability.parkedDocks && !locked,
         approvalsPending: approvalsOpen,
         elicitationPending: elicits.open,
         onOutput: conversation.sendToolOutput,
     })
+    const secrets = useSecretDock({
+        messages: conversation.messages,
+        enabled: interactionAvailability.parkedDocks && !locked,
+        onOutput: conversation.sendToolOutput,
+    })
+    // Every dock the run can park on the user. A message typed over any of them answers it.
+    const parkedDocks = [
+        // A deny-with-note already answering the gate owns it; a second answer would race it.
+        {
+            open: approvalsOpen && steerActions.phase !== "resuming",
+            dismiss: conversation.approvals.dismiss,
+        },
+        elicits,
+        connects,
+        secrets,
+    ]
     // The docks know an ask is answered before `hitlPending` does; an ask with no dock stays a wait.
-    const cardOpen = approvalsOpen || elicits.open || connects.open || Boolean(pendingSecret)
+    const cardOpen = parkedDocks.some((dock) => dock.open)
     const answerInFlight =
         conversation.approvals.settledIds.size > 0 ||
         elicits.settlingIds.size > 0 ||
-        connects.settlingIds.size > 0
+        connects.settlingIds.size > 0 ||
+        secrets.settlingIds.size > 0
+    // A message sent over open docks answers them: each settles as its own decline would, then
+    // the message steers into the resumed run so the agent reads it next. Settled together: a
+    // failure after one dock had gone would hand the text back with that request silently
+    // cancelled. The steer waits on the dismissals, but its message shows now. `steer` rather
+    // than `send`: the session has already run, so there is no registration to do.
+    const steerOverDocks = async (input: Parameters<typeof conversation.steer>[0]) => {
+        const open = parkedDocks.filter((dock) => dock.open)
+        if (open.length === 0) return false
+        const dismissed = Promise.all(open.map((dock) => dock.dismiss()))
+        await conversation.steer(input, {after: dismissed})
+        return true
+    }
     const parkedOnUser = conversation.hitlPending && (cardOpen || !answerInFlight)
     const resumingAfterAnswer = conversation.hitlPending && !cardOpen && answerInFlight
 
-    const secretDockOpen =
-        !streamingHere && !stopping && !conversation.stopped && Boolean(pendingSecret)
     // Rewind: re-run the conversation from a turn. The hook only SCANS (it never opens dialogs),
     // so the warning about tools that already ran, and putting a rewound user message back into
     // the composer, are this surface's job — same division the desktop uses. `composerRef` is
@@ -700,6 +813,8 @@ export const LiveConversation = ({
             const plan = rewind(turn.message)
             if (!plan) return
             const run = () => {
+                // Access can go while the confirmation is open: the OK then writes nothing.
+                if (lockedRef.current) return
                 plan.confirm()
                 if (plan.restoreText === undefined) return
                 composerRef.current?.setMarkdown(plan.restoreText)
@@ -726,22 +841,26 @@ export const LiveConversation = ({
     const scrollerRef = autoScroll.ref
     // Read through a ref: `pendingApprovals` is rebuilt every streamed commit, so depending on it
     // would re-register the listener on the hot path.
-    const shortcutRef = useRef({streamingHere, pendingApprovals, approvalActions, stopHere})
-    shortcutRef.current = {streamingHere, pendingApprovals, approvalActions, stopHere}
+    const shortcutRef = useRef({streamingHere, pendingApprovals, approvalActions, stopHere, locked})
+    shortcutRef.current = {streamingHere, pendingApprovals, approvalActions, stopHere, locked}
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
+            const stopKey = e.key === "Escape" && !e.isComposing
+            const approveKey = isAltChord(e) && e.code === "KeyG"
+            if (!stopKey && !approveKey) return
             // Radix lets a cancelled Escape through and never touches Alt+G; the pane can hide us.
             if (e.defaultPrevented || isOverlayOpen()) return
             if (!isOnScreen(scrollerRef.current)) return
             const current = shortcutRef.current
-            if (e.key === "Escape" && !e.isComposing && current.streamingHere) {
+            if (stopKey && current.streamingHere) {
                 e.preventDefault()
                 // `stopHere`, not the local abort: Escape must cancel the run on the server too.
                 current.stopHere()
                 return
             }
             // ONE gate, never "Approve all" — a mis-press must not grant a tool nobody read.
-            if (isAltChord(e) && e.code === "KeyG" && current.pendingApprovals.length > 0) {
+            // Someone who cannot send cannot approve either, by key no more than by tap.
+            if (approveKey && !current.locked && current.pendingApprovals.length > 0) {
                 e.preventDefault()
                 current.approvalActions.respond({
                     approved: true,
@@ -804,21 +923,24 @@ export const LiveConversation = ({
                             </div>
                         ) : conversation.historyUnavailable ? (
                             <p className="text-muted-foreground mt-3 text-center text-xs">
-                                This session&apos;s earlier messages are no longer stored. New
-                                messages still work.
+                                No messages are saved in this session. Messages that failed to send
+                                are not kept, and old messages can expire.
                             </p>
                         ) : null}
                     </div>
                 ) : null}
                 <TranscriptTurns
                     turns={visibleTurns}
+                    scrollerRef={autoScroll.ref}
                     sessionId={sessionId}
                     remoteRunning={showingTurnActivity && !streamingHere}
                     waitingOnUser={parkedOnUser}
                     resuming={resumingAfterAnswer}
                     pending={showTrailingWorkingPulse(showingTurnActivity, visibleTurns)}
-                    onClientToolOutput={conversation.sendToolOutput}
-                    onRewind={handleRewind}
+                    // A tool answer and a rewind both write: someone who cannot send here cannot
+                    // answer a tool or re-run a turn (retry rides rewind) either.
+                    onClientToolOutput={locked ? undefined : conversation.sendToolOutput}
+                    onRewind={locked ? undefined : handleRewind}
                 />
             </ContentRail>
         )
@@ -841,7 +963,9 @@ export const LiveConversation = ({
                     <div className="relative">
                         {/* What you have lined up stays visible while a gate is open: the queued
                         message is the acknowledgement that the user's Send was not lost. */}
-                        {conversation.queued.length > 0 || conversation.editingId ? (
+                        {/* Not for a reader who cannot send: every row control (send now, edit,
+                        remove) writes, and nothing they queued can go out from here. */}
+                        {!locked && (conversation.queued.length > 0 || conversation.editingId) ? (
                             <div className="bg-background shrink-0 px-3 pt-3 pb-0">
                                 <ContentRail>
                                     <QueuedMessagesDock
@@ -869,21 +993,25 @@ export const LiveConversation = ({
                                 actions={approvalActions}
                                 entityId={entityId}
                                 bottomMost={false}
+                                readOnly={locked}
+                                readOnlyNote={readOnly?.approvalNote}
                             />
                         ) : null}
                         {/* Parked question forms, between approval and connect — the same order as
                         desktop, and the same order as the keyboard precedence. */}
-                        {secretDockOpen && pendingSecret ? (
-                            <ContentRail>
-                                <SecretRequestDock
-                                    key={pendingSecret.toolCallId}
-                                    meta={pendingSecret}
-                                    revisionId={entityId}
-                                    onAdoptRevision={adoptSecretRevision}
-                                    canEditSecrets={canEditSecrets}
-                                    onOutput={conversation.sendToolOutput}
-                                />
-                            </ContentRail>
+                        {secrets.front ? (
+                            <div className="bg-background shrink-0 px-3 pt-3 pb-0">
+                                <ContentRail>
+                                    <SecretRequestDock
+                                        key={secrets.front.toolCallId}
+                                        meta={secrets.front}
+                                        revisionId={entityId}
+                                        onAdoptRevision={adoptSecretRevision}
+                                        canEditSecrets={canEditSecrets}
+                                        onOutput={secrets.settle}
+                                    />
+                                </ContentRail>
+                            </div>
                         ) : null}
                         {elicits.open ? (
                             <div className="bg-background shrink-0 px-3 pt-3 pb-0">
@@ -909,19 +1037,18 @@ export const LiveConversation = ({
                                 </ContentRail>
                             </div>
                         ) : null}
-                        {/* The template's accounts, asked for once on arrival. Above the model
-                        strip because it is what the user came here holding: the first message is
-                        parked behind it, and "Continue" is what releases it. */}
-                        {setup.open ? (
+                        {/* The viewer's own accounts for this agent's "user" items. Not `locked`: a
+                        reloaded chat with no turns has no session row, so sending stays off, and
+                        the card holds no message. */}
+                        {personalSetup.open && !readOnly && !accessPending ? (
                             <div className="bg-background shrink-0 px-3 pt-3 pb-0">
                                 <ContentRail>
-                                    <AgentSetupCard
-                                        accounts={setup.accounts}
-                                        suggestions={setup.suggestions}
-                                        onAddAccount={setup.addAccount}
-                                        onCreate={setup.resolve}
-                                        onDismiss={setup.resolve}
-                                        createLabel="Continue"
+                                    <PersonalAccountsCard
+                                        workflowId={personalSetup.workflowId}
+                                        items={personalSetup.items}
+                                        pendingKeys={personalSetup.pendingKeys}
+                                        onContinue={personalSetup.close}
+                                        onDismiss={personalSetup.close}
                                     />
                                 </ContentRail>
                             </div>
@@ -930,7 +1057,29 @@ export const LiveConversation = ({
                         the same place the desktop banner sits. */}
                         <ContentRail>
                             <ConnectModelStrip gateActive={modelBlocked} />
+                            {modelBlocked ? null : (
+                                <ModelSetupBanner revisionId={entityId} onSetUp={openModelSetup} />
+                            )}
                         </ContentRail>
+                        {readOnly ? null : (
+                            <div className="bg-background shrink-0 px-3">
+                                <ContentRail>
+                                    <CreditAlertStrip
+                                        projectId={projectId}
+                                        entityId={entityId}
+                                        hidden={modelBlocked || setupBlocked}
+                                        dockOpen={
+                                            approvalsOpen ||
+                                            Boolean(secrets.front) ||
+                                            elicits.open ||
+                                            connects.open ||
+                                            (personalSetup.open && !readOnly && !accessPending)
+                                        }
+                                        onSwitchModel={() => modelPickerRef.current?.()}
+                                    />
+                                </ContentRail>
+                            </div>
+                        )}
                         {/* Failed Home tasks retain their original text and files for retry. */}
                         {pendingTaskError ? (
                             <PendingTaskError
@@ -939,83 +1088,82 @@ export const LiveConversation = ({
                                     (part) => part.filename || "Attachment",
                                 )}
                                 retryDisabled={
+                                    locked ||
                                     isHydrating ||
                                     modelBlocked ||
+                                    setupBlocked ||
                                     (modelKeyLoading && modelKeyWaitedMs < MODEL_KEY_WAIT_LIMIT_MS)
                                 }
-                                onRetry={() =>
+                                onRetry={() => {
+                                    if (locked) return
                                     void sendPendingTask({
                                         sessionId,
                                         retry: true,
                                         send: (task) => send({text: task.text, parts: task.parts}),
                                     })
-                                }
+                                }}
                             />
                         ) : null}
-                        <Composer
-                            entityId={entityId}
-                            sessionId={sessionId}
-                            attachments={attachments}
-                            onRefusedOverDraft={({text, parts}) =>
-                                conversation.keepRefusedSend({text, fileParts: parts})
-                            }
-                            onSend={async ({text, parts, stagedFiles}) => {
-                                setStoppingHere(false)
-                                // An open edit rewrites its held message instead of sending. The
-                                // input clears on submit, so the displaced draft goes back after.
-                                if (!conversation.editingId) {
-                                    // A message typed over a parked question or connection
-                                    // request replaces it: the cards settle exactly as their own
-                                    // ✕ / "Not now" would, then the message steers into the
-                                    // resumed run so the agent reads it next, not after. A
-                                    // dismiss that fails throws here, and the composer's catch
-                                    // puts the text back with the cards intact. `steer` rather
-                                    // than `send`: the session has already run, so there is no
-                                    // fresh-session registration to do.
-                                    //
-                                    // Settled together, not in sequence: a failure after one dock
-                                    // had already gone would hand the text back with that dock's
-                                    // request silently cancelled. Both writes go out, and the
-                                    // first rejection is what the composer reports.
-                                    if (elicits.open || connects.open) {
-                                        await Promise.all([
-                                            elicits.open ? elicits.dismiss() : null,
-                                            connects.open ? connects.dismiss() : null,
-                                        ])
-                                        await conversation.steer({text, parts, stagedFiles})
+                        {readOnly ? (
+                            <ReadOnlyComposerNotice text={readOnly.notice} />
+                        ) : (
+                            <Composer
+                                entityId={entityId}
+                                sessionId={sessionId}
+                                attachments={attachments}
+                                onRefusedOverDraft={({text, parts}) =>
+                                    conversation.keepRefusedSend({text, fileParts: parts})
+                                }
+                                onSend={async ({text, parts, stagedFiles}) => {
+                                    if (locked) return
+                                    setStoppingHere(false)
+                                    // An open edit rewrites its held message instead of sending. The
+                                    // input clears on submit, so the displaced draft goes back after.
+                                    if (!conversation.editingId) {
+                                        if (await steerOverDocks({text, parts, stagedFiles})) return
+                                        await send({text, parts, stagedFiles})
                                         return
                                     }
-                                    await send({text, parts, stagedFiles})
-                                    return
+                                    const draft = await conversation.commitEdit({
+                                        text,
+                                        fileParts: parts,
+                                    })
+                                    if (draft)
+                                        requestAnimationFrame(() =>
+                                            composerRef.current?.setMarkdown(draft),
+                                        )
+                                }}
+                                onSteer={async ({text, parts, stagedFiles}) => {
+                                    if (locked) return
+                                    if (await steerOverDocks({text, parts, stagedFiles})) return
+                                    await conversation.steer({text, parts, stagedFiles})
+                                }}
+                                disabled={disabled}
+                                sendDisabled={setupBlocked}
+                                placeholder={
+                                    modelBlocked
+                                        ? "Connect a model to start chatting…"
+                                        : setupBlocked
+                                          ? MODEL_SETUP_PLACEHOLDER
+                                          : undefined
                                 }
-                                const draft = await conversation.commitEdit({
-                                    text,
-                                    fileParts: parts,
-                                })
-                                if (draft)
-                                    requestAnimationFrame(() =>
-                                        composerRef.current?.setMarkdown(draft),
-                                    )
-                            }}
-                            onSteer={({text, parts, stagedFiles}) =>
-                                conversation.steer({text, parts, stagedFiles})
-                            }
-                            disabled={disabled}
-                            placeholder={
-                                modelBlocked ? "Connect a model to start chatting…" : undefined
-                            }
-                            waitingOnUser={parkedOnUser}
-                            streaming={shouldShowStopControl({
-                                busy: streamingHere,
-                                hitlPending: conversation.hitlPending,
-                            })}
-                            stopping={stopping}
-                            onStop={stopHere}
-                            inputBusy={conversation.inputBusy}
-                            inputRef={composerRef}
-                            // Same gate the rail's `+` uses: starting one needs an agent.
-                            onNewSession={agentId ? () => startBlankSession(agentId) : undefined}
-                        />
+                                hasTurns={!conversation.isEmpty}
+                                waitingOnUser={parkedOnUser}
+                                streaming={shouldShowStopControl({
+                                    busy: streamingHere,
+                                    hitlPending: conversation.hitlPending,
+                                })}
+                                stopping={stopping}
+                                onStop={stopHere}
+                                inputBusy={conversation.inputBusy}
+                                inputRef={composerRef}
+                                modelPickerRef={modelPickerRef}
+                                // Same gate the rail's `+` uses: starting one needs an agent.
+                                onNewSession={
+                                    agentId ? () => startBlankSession(agentId) : undefined
+                                }
+                            />
+                        )}
                     </div>
                 }
             >

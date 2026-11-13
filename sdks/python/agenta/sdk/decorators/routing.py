@@ -14,6 +14,7 @@ from starlette.routing import Mount
 from agenta.sdk.utils.exceptions import suppress
 from agenta.sdk.utils.logging import get_module_logger
 from agenta.sdk.models.workflows import (
+    details_of,
     failure_code_of,
     retry_after_of,
     returned_stacktrace,
@@ -49,6 +50,7 @@ from agenta.sdk.engines.tracing.server import RouteSpanNameMiddleware
 from agenta.sdk.contexts.tracing import TracingContext, tracing_context_manager
 from agenta.sdk.decorators.running import auto_workflow, inspect_workflow, Workflow
 from agenta.sdk.engines.running.errors import ErrorStatus
+from agenta.sdk.redaction.redactor import strip_echoed_key_fragments
 from agenta.sdk.agents.platform.connection import PlatformConnection
 
 
@@ -584,10 +586,11 @@ async def handle_invoke_failure(exception: Exception) -> Response:
         status = WorkflowServiceStatus(
             type=exception.type,
             code=exception.code,
-            message=exception.message,
+            message=strip_echoed_key_fragments(exception.message),
             stacktrace=returned_stacktrace(exception.stacktrace),
             failure_code=failure_code,
             retry_after=retry_after_of(exception),
+            details=details_of(exception),
         )
 
     else:
@@ -602,7 +605,7 @@ async def handle_invoke_failure(exception: Exception) -> Response:
         if code in [401, 403, 429]:  # Downstream API errors
             code = 424
 
-        message = str(exception) or "Internal Server Error"
+        message = strip_echoed_key_fragments(str(exception)) or "Internal Server Error"
 
         stacktrace = format_exception(
             exception,  # type: ignore
@@ -618,6 +621,7 @@ async def handle_invoke_failure(exception: Exception) -> Response:
             stacktrace=returned_stacktrace(stacktrace),
             failure_code=failure_code,
             retry_after=retry_after_of(exception),
+            details=details_of(exception),
         )
 
     trace_id = None
@@ -692,7 +696,7 @@ async def handle_inspect_failure(exception: Exception) -> Response:
     if code in [401, 403, 429]:  # Downstream API errors
         code = 424
 
-    message = str(exception) or "Internal Server Error"
+    message = strip_echoed_key_fragments(str(exception)) or "Internal Server Error"
 
     return JSONResponse({"details": message}, status_code=code)
 

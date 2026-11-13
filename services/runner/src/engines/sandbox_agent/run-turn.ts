@@ -1,3 +1,4 @@
+import { acpToolName } from "../../acp-tool-name.ts";
 import { apiBase } from "../../apiBase.ts";
 import {
   effectivePermission,
@@ -19,6 +20,7 @@ import {
   thrownFields,
 } from "../../subscription-events.ts";
 import { startPlatformCredentialLease } from "../../sessions/auth.ts";
+import { startToolCallbackRuntime } from "../../tools/run-credential.ts";
 import {
   ApprovalResponder,
   ApprovedExecutionGrants,
@@ -54,6 +56,7 @@ import {
 } from "./acp-interactions.ts";
 import {
   buildClientToolRelay,
+  internalToolName,
   relayWritesPausedAnswer,
 } from "./client-tools.ts";
 import { buildExecutableToolGate } from "./executable-tools.ts";
@@ -86,6 +89,7 @@ import {
   TURN_TIME_LIMIT_CODE,
   withinCredentialPropagationWindow,
   withPublicCode,
+  classifyGatewayPolicyDenial,
 } from "./errors.ts";
 import { noteExecutionSettled } from "../../sessions/execution-registry.ts";
 import {
@@ -116,6 +120,7 @@ import {
 import {
   createRunLimits,
   resolveRunLimits,
+  toolCallLimitMs,
   type RunLimitKind,
 } from "./run-limits.ts";
 import {
@@ -154,6 +159,11 @@ import {
 } from "../../gateway-error.ts";
 import { mcpHandshakeFailureMessage } from "./mcp-handshake.ts";
 import { reconstructHistoryIfNeeded } from "./reconstruct-history.ts";
+import {
+  ACCESS_DENIED_CODE,
+  accessDeniedDetail,
+  isAccessDeniedError,
+} from "../../sessions/access-denied.ts";
 import { carriesApprovalReplyOnly } from "./session-identity.ts";
 import { buildTurnText, priorMessages } from "./transcript.ts";
 import {
@@ -222,17 +232,18 @@ export async function runTurn(
   // exposure. Do NOT add unconditional I/O anywhere above that call; hand pre-turn reads in
   // through `opts` instead (see `opts.seededDecisions`).
   const { plan, logger, deps } = env;
-  const initialCredential = opts.credential ?? (() => runCredential(request));
+  const initialCredential =
+    opts.credentialLease?.credential ?? (() => runCredential(request));
   const initialOtlpTarget = resolveRunOtlpTarget(request, initialCredential);
-  // Session-owned turns receive the watchdog's lease through opts.credential. A standalone
+  // Session-owned turns receive the watchdog's lease through opts.credentialLease. A standalone
   // Agenta run owns the same reusable lease here so even a single 12-hour turn exports with a
   // current credential. External collector headers stay static and never enter this exchange.
   const platformCredentialLease =
-    !opts.credential && initialOtlpTarget.authorizationSource === "platform"
+    !opts.credentialLease && initialOtlpTarget.authorizationSource === "platform"
       ? startPlatformCredentialLease(apiBase(), runCredential(request))
       : undefined;
-  const credential =
-    opts.credential ?? platformCredentialLease?.credential ?? initialCredential;
+  const platformLease = opts.credentialLease ?? platformCredentialLease;
+  const credential = platformLease?.credential ?? initialCredential;
   const otlpTarget = resolveRunOtlpTarget(request, credential);
   const sessionId = env.sessionId;
   const toolRunContext = env.sessionId
@@ -326,6 +337,8 @@ export async function runTurn(
   let turnLedgerForFailure:
     | { sessionId: string; turnIndex: number }
     | undefined;
+  // Set once the harness answered the cancel a tripped time limit sent (`stopHarnessAfterLimit`).
+  let limitStopSettled = false;
   /**
    * After a failed turn: keep the harness's native session when it can take the failed turn back
    * out of its transcript, otherwise drop the resume point (the next turn replays).
@@ -338,9 +351,16 @@ export async function runTurn(
    */
   const settleFailedTurnContinuity = async (): Promise<boolean> => {
     let rolledBack = false;
-    // Only a harness in this runner can roll its own transcript back.
     const session = env.session as Partial<InRunnerSessionHandle> | undefined;
-    if (session?.rollbackFailedTurn) {
+    // A time limit is no refusal: the turn's work is sound, and the person is told to continue it.
+    // A harness that answered the limit's cancel holds a short but finished turn, as after a Stop,
+    // so its transcript stays the resume point with that work in it.
+    // An update that crossed the output limit while the cancel settled was never recorded, so that
+    // turn is not a faithful resume point.
+    const keepsWork =
+      limitStopSettled && !outputLimitReason && session?.nativeHistorySaved?.() !== false;
+    // Only a harness in this runner can roll its own transcript back.
+    if (!keepsWork && session?.rollbackFailedTurn) {
       try {
         rolledBack = await session.rollbackFailedTurn();
       } catch (err) {
@@ -351,7 +371,7 @@ export async function runTurn(
     }
     const agentSessionId = env.session?.agentSessionId as string | undefined;
     if (
-      !rolledBack ||
+      !(rolledBack || keepsWork) ||
       !sessionId ||
       !agentSessionId ||
       env.continuityTurnIndex === undefined
@@ -468,7 +488,32 @@ export async function runTurn(
   const runLimitTripped = new Promise<void>((resolve) => {
     runLimitTrip = resolve;
   });
-  runLimits.onTrip((reason, kind) => {
+  /**
+   * After a time limit trips mid-turn, stop the harness the way a Stop does (`cancel-turn.ts`)
+   * before the failure path destroys its session. A harness that answers has saved a finished
+   * turn, which `settleFailedTurnContinuity` keeps as the resume point, so a "continue" picks the
+   * work up natively. One that does not answer is handled as before. The first-response limit is
+   * left out: that turn did nothing, and the dispatch retries it.
+   */
+  const stopHarnessAfterLimit = async (promptPromise: Promise<unknown>): Promise<void> => {
+    const cancel = await cancelHarnessTurn({
+      sandbox: env.sandbox,
+      sessionId: env.session?.id,
+      promptPromise,
+      log: logger,
+    });
+    // Only a prompt that answered the cancel as cancelled ended on the limit. One that ended on
+    // its own in that window, with an error above all, may hold content a provider refused, so
+    // the failed-turn rule applies to it.
+    const endedAs = cancel.settled
+      ? await promptPromise.then(
+          (value) => (value as { stopReason?: unknown } | undefined)?.stopReason,
+          () => undefined,
+        )
+      : undefined;
+    limitStopSettled = endedAs === "cancelled";
+  };
+  runLimits.onTrip((reason, kind, limitMs) => {
     runLimitReason = reason;
     runLimitKind = kind;
     if (kind === "total" && resolvedRunLimits.turnLimitMessage) {
@@ -478,15 +523,7 @@ export async function runTurn(
       );
     } else {
       // The log keeps `reason`; the person reads which limit ended the turn.
-      runLimitPublicError = runLimitError(
-        kind,
-        {
-          total: resolvedRunLimits.totalMs,
-          idle: resolvedRunLimits.idleMs,
-          ttfb: resolvedRunLimits.ttfbMs,
-          "tool-call": resolvedRunLimits.toolCallMs,
-        }[kind],
-      );
+      runLimitPublicError = runLimitError(kind, limitMs);
     }
     runLimitTrip?.();
   });
@@ -516,6 +553,20 @@ export async function runTurn(
       "[sandbox-liveness] no health URL on this sandbox; polling disabled " +
         "(the transport's own sandbox-gone report still ends the turn)",
     );
+  }
+
+  // Built per turn, never kept on the pooled environment, so a warm turn reads its own credential.
+  let toolCallback: ReturnType<typeof startToolCallbackRuntime>;
+  try {
+    toolCallback = startToolCallbackRuntime(
+      request.toolCallback as ToolCallbackContext | undefined,
+      platformLease,
+      logger,
+    );
+  } catch (err) {
+    // The `finally` below is not reached yet, so stop the standalone lease here.
+    platformCredentialLease?.release();
+    throw err;
   }
 
   // Declared outside the `try` so the failure path can see it: an approval reply is never
@@ -567,7 +618,8 @@ export async function runTurn(
           : undefined,
       );
     } catch (err) {
-      if (!opts.resume) throw err;
+      // A caller who lost access cannot continue a live resume either.
+      if (!opts.resume || isAccessDeniedError(err)) throw err;
       const detail = err instanceof Error ? err.message : String(err);
       logger(
         `[reconstruct] live resume: keeping the inbound history (${detail})`,
@@ -860,6 +912,23 @@ export async function runTurn(
     void pause.signal.then(() => runLimits.notePaused());
 
     const openToolCallIds = (): string[] => run.openToolCallIds?.() ?? [];
+    // The SAME name->spec index the relay execute loop hands to the relay execution guard, so
+    // the approval card and the guard cannot disagree about a tool's permission/readOnly.
+    const specsByName = toolSpecsByName(plan.tools.toolSpecs);
+    // The limit one tool call gets: a runner tool whose spec has its own budget (a reference
+    // tool) may run that long, every other call keeps the run's tool-call limit.
+    // An exact spec name comes first: Pi emits its custom tools under their own name, which may
+    // itself start with `mcp__`.
+    const toolBudgetMs = (toolName: string | undefined): number | undefined => {
+      if (!toolName) return undefined;
+      const name = specsByName.has(toolName) ? toolName : internalToolName(toolName);
+      return name ? specsByName.get(name)?.timeoutMs : undefined;
+    };
+    // How long to wait for an approved call to close: the same bound the watchdog uses (the
+    // call's limit plus the grace), so a result that lands inside the grace is not lost.
+    const callClosureWaitMs = (toolName: string | undefined): number =>
+      toolCallLimitMs(resolvedRunLimits.toolCallMs, toolBudgetMs(toolName)) +
+      (resolvedRunLimits.toolCallGraceMs ?? 0);
     const approvedExecutionSeeds = new Map<string, ParkedApprovedExecution>(
       carriedApprovedExecutions.map((seed) => [seed.toolCallId, seed]),
     );
@@ -959,9 +1028,14 @@ export async function runTurn(
           sessionUpdate?: unknown;
           toolCallId?: unknown;
           status?: unknown;
+          title?: unknown;
         };
         if (rawFrame?.sessionUpdate === "tool_call" && rawFrame.toolCallId) {
-          runLimits.noteToolCallStart(String(rawFrame.toolCallId));
+          const name = acpToolName(rawFrame);
+          runLimits.noteToolCallStart(
+            String(rawFrame.toolCallId),
+            toolBudgetMs(name ?? (typeof rawFrame.title === "string" ? rawFrame.title : undefined)),
+          );
         } else if (
           rawFrame?.sessionUpdate === "tool_call_update" &&
           rawFrame.toolCallId &&
@@ -998,7 +1072,7 @@ export async function runTurn(
             };
             const existing = approvedExecutionSeeds.get(frame.toolCallId);
             const toolName =
-              [announced.name, announced.title, announced.kind].find(
+              [acpToolName(announced), announced.title, announced.kind].find(
                 (value): value is string =>
                   typeof value === "string" && value.length > 0,
               ) ?? existing?.toolName;
@@ -1084,6 +1158,9 @@ export async function runTurn(
         kind: seed.toolName,
         rawInput: seed.args,
       });
+      // The harness announced this call in an earlier turn and will not announce it again, so
+      // this turn's watchdog starts it here (it otherwise never sees the call as open).
+      runLimits.noteToolCallStart(seed.toolCallId, toolBudgetMs(seed.toolName));
       pause.markAllowedExecution(seed.toolCallId);
       executionGrants.grant(seed.toolName, seed.args);
     };
@@ -1200,9 +1277,6 @@ export async function runTurn(
       await Promise.all(settling);
     };
     const mcpPermissions = mcpPermissionsFromRequest(request, logger);
-    // The SAME name->spec index the relay execute loop hands to the relay execution guard, so
-    // the approval card and the guard cannot disagree about a tool's permission/readOnly.
-    const specsByName = toolSpecsByName(plan.tools.toolSpecs);
     const settleBufferedPausedCompletions = (): void => {
       for (const [toolCallId, update] of [
         ...bufferedPausedCompletedFrames.entries(),
@@ -1228,7 +1302,7 @@ export async function runTurn(
           undefined,
           {
             toolCallId,
-            name: frame.name,
+            name: acpToolName(frame),
             title: frame.title,
             kind: frame.kind,
             rawInput: frame.rawInput,
@@ -1274,7 +1348,7 @@ export async function runTurn(
       isDaytona: plan.isDaytona,
       workspaceCwd: plan.workspace.cwd,
       sandbox: env.sandbox,
-      callback: request.toolCallback as ToolCallbackContext | undefined,
+      callback: toolCallback.runtime,
       runContext: request.runContext,
       permissionPlan,
       toolSpecs: plan.tools.toolSpecs,
@@ -1416,6 +1490,9 @@ export async function runTurn(
             pause,
             recordPendingInteraction,
             toolCallIndex: env.toolCallIndex,
+            onNonParkablePause: () => {
+              env.nonParkablePauseCount += 1;
+            },
             permissionPlan,
             executionGrants,
             log: logger,
@@ -1456,7 +1533,7 @@ export async function runTurn(
           : (deps.localRelayHost ?? localRelayHost)(),
         plan.workspace.relayDir,
         plan.tools.toolSpecs,
-        request.toolCallback as ToolCallbackContext | undefined,
+        toolCallback.runtime,
         toolRunContext,
         env.clientToolRelayRef.current,
         relayGuard,
@@ -1535,6 +1612,11 @@ export async function runTurn(
             toolName: decision.toolName,
             args: decision.args,
           });
+          // Same as `seedApprovedExecution`: the approved call runs now, without a new announcement.
+          runLimits.noteToolCallStart(
+            decision.toolCallId,
+            toolBudgetMs(decision.toolName),
+          );
           pause.markAllowedExecution(decision.toolCallId);
           executionGrants.grant(decision.toolName, decision.args);
         }
@@ -1576,12 +1658,15 @@ export async function runTurn(
       // impossible and the paused-settle's park-and-carry branch owns those spans.
       if (opts.resume && opts.resume.carriedForward.length > 0) {
         if (!plan.isPi) {
-          const answeredAllowedIds = decisions
-            .filter((decision) => decision.reply === "once")
-            .map((decision) => decision.toolCallId);
+          const answeredAllowed = decisions.filter(
+            (decision) => decision.reply === "once",
+          );
           await Promise.all(
-            answeredAllowedIds.map((toolCallId) =>
-              waitForToolCallClosure(toolCallId, resolvedRunLimits.toolCallMs),
+            answeredAllowed.map((decision) =>
+              waitForToolCallClosure(
+                decision.toolCallId,
+                callClosureWaitMs(decision.toolName),
+              ),
             ),
           );
         }
@@ -1646,6 +1731,8 @@ export async function runTurn(
     // A tripped run-limit ends the turn as an error: throw into the shared catch below so the
     // trace is flushed and the caller's teardown reclaims the (wedged) sandbox.
     if (raced === RUN_LIMIT_TRIPPED || outputLimitReason) {
+      if (!outputLimitReason && runLimitKind && runLimitKind !== "ttfb")
+        await stopHarnessAfterLimit(promptPromise);
       throw runLimitPublicError ?? new Error(runLimitReason ?? "run limit tripped");
     }
     let stopReason =
@@ -1716,7 +1803,7 @@ export async function runTurn(
           openAllowedExecutions.map(async (toolCallId) => {
             const closed = await waitForToolCallClosure(
               toolCallId,
-              resolvedRunLimits.toolCallMs,
+              callClosureWaitMs(approvedExecutionSeeds.get(toolCallId)?.toolName),
             );
             if (closed) return;
             run.settleOpenToolCalls(
@@ -1922,7 +2009,15 @@ export async function runTurn(
         : undefined;
     let swallowedError: string | undefined;
     let swallowedDetail = swallowedGatewayRefusal;
-    if (swallowedGatewayRefusal) {
+    // The gateway's own `policy_denied` (a lost access, or its spending check) gets its sentence.
+    const swallowedPolicyDenial = classifyGatewayPolicyDenial(swallowedGatewayRefusal);
+    if (swallowedPolicyDenial) {
+      const denied = swallowedPolicyDenial;
+      swallowedError = denied.message;
+      swallowedDetail = denied.detail;
+      run.recordError(swallowedError, request.modelConnection?.provider);
+      run.emitEvent(errorEventWithDetail(denied.message, denied.code, denied.detail));
+    } else if (swallowedGatewayRefusal) {
       const personFacing = personFacingGatewayRefusal(visibleOutput);
       swallowedError = personFacing?.message ?? swallowedGatewayRefusal.message;
       run.recordError(swallowedError, request.modelConnection?.provider);
@@ -2066,6 +2161,9 @@ export async function runTurn(
           {
             agentSessionId,
             endTime: turnEndedAt,
+            // The tracer's settled usage of this turn; none when the turn resolved none (a Pi
+            // approval resume reports its usage under the paused turn).
+            ...(usage ? { usage } : {}),
           },
           { authorization: credential(), log: logger },
         ).catch(() => {});
@@ -2167,6 +2265,8 @@ export async function runTurn(
         : {}),
       // Structured so the dispatch can tell this refusal from a broken session: it must not
       // delete the environment or retry cold, and the caller may send the message again.
+      // Structured so a client reads the class, not the prose (the SDK takes `failure_code` from it).
+      ...(classified.code === ACCESS_DENIED_CODE ? { errorDetail: accessDeniedDetail() } : {}),
       ...(classified.code === TURN_INDEX_TAKEN_CODE
         ? {
             errorDetail: {
@@ -2180,6 +2280,7 @@ export async function runTurn(
     };
   } finally {
     platformCredentialLease?.release();
+    toolCallback.release();
     // Backstop for the exits that reach neither branch above (cancel, abort). Idempotent via the
     // resolved-token set, so the ordered calls make this a no-op on the paths that took them, and
     // never throws — a row whose gate is gone is unanswerable however the turn ended.

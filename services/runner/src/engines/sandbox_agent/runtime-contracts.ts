@@ -1,4 +1,5 @@
 import { InMemorySessionPersistDriver, SandboxAgent } from "sandbox-agent";
+import type { PlatformCredentialSource } from "../../sessions/auth.ts";
 import type { SeededDecision } from "../../sessions/interactions.ts";
 import type { AgentToolsSetupExec, AgentToolsSetupResult } from "./agent-tools-setup.ts";
 
@@ -241,8 +242,8 @@ export interface ParkedApprovedExecution {
 
 /** Per-turn options for `runTurn`. Absent (flag off / cold) means today's byte-identical path. */
 export interface RunTurnOptions {
-  /** Latest session credential accessor; long turns may refresh the value between API calls. */
-  credential?: () => string;
+  /** The session credential lease; long turns may refresh the value between API calls. */
+  credentialLease?: PlatformCredentialSource;
   /**
    * Durable approval decisions this session already holds, read and CLAIMED by the caller via
    * `loadDurableDecisions`. Passed in rather than read here because that read is I/O and
@@ -468,6 +469,12 @@ export interface SessionEnvironment {
    * cwd mount with the same TTL, so their expiry is never the minimum.
    */
   installedMountExpiries: InstalledMountExpiries;
+  /**
+   * True from the end of the acquire's mounts until the first turn starts. That turn skips the
+   * turn-start refresh of the drive views, because the mounts are seconds old. See
+   * `refreshDriveViewsAtTurnStart`.
+   */
+  driveViewsFresh?: boolean;
   durableCwdSafeToDelete: boolean;
   workspace: { cleanup: () => Promise<void> } | undefined;
   runtimeRemount: Promise<boolean> | undefined;

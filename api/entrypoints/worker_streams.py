@@ -31,6 +31,7 @@ from oss.src.tasks.taskiq.shared.broker import (
     prune_idle_consumers,
 )
 
+from entrypoints.access import bootstrap_access
 from entrypoints.channel_adapters import build_channel_adapter_registry
 from oss.src.core.channels.service import ChannelsService
 from oss.src.core.events.service import EventsService
@@ -60,6 +61,7 @@ from oss.src.dbs.postgres.shared.engine import (
 from oss.src.dbs.postgres.tracing.dao import TracingDAO
 from oss.src.dbs.postgres.webhooks.dao import WebhooksDAO
 from oss.src.dbs.redis.sessions.watch import SessionsWatchPublisher
+from oss.src.dbs.redis.shared.engine import streams_client_options
 from oss.src.tasks.asyncio.channels.outbox import (
     ChannelsOutboxStreamWorker,
     ChannelsOutboxWorker,
@@ -124,6 +126,7 @@ async def _build_spans_worker(redis_client: Redis) -> StreamConsumer:
         redis_client=redis_client,
         stream_name="streams:spans",
         consumer_group="worker-spans",
+        turns_service=SessionTurnsService(turns_dao=SessionTurnsDAO()),
     )
 
 
@@ -275,11 +278,13 @@ async def main_async() -> int:
         if is_ee():
             bootstrap_entitlements_services()
 
-        # socket_timeout=None: XREADGROUP(block=5000ms) would otherwise trip the socket timeout.
+        bootstrap_access()
+
+        # The socket timeout outlasts XREADGROUP(block=5000ms), see streams_client_options.
         redis_client = Redis.from_url(
             env.redis.uri_durable,
             decode_responses=False,
-            socket_timeout=None,
+            **streams_client_options(),
         )
 
         builders = {

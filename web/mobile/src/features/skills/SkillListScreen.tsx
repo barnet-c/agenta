@@ -1,5 +1,6 @@
 import {useCallback, useEffect, useMemo, useState} from "react"
 
+import {useDebounceInput} from "@agenta/shared/hooks"
 import {
     invalidateSkillsListCache,
     skillsListDataAtom,
@@ -25,6 +26,7 @@ import {useAtom, useAtomValue, useSetAtom} from "jotai"
 import {PageTitle} from "@/components/PageTitle"
 import {ScreenScaffold} from "@/components/ScreenScaffold"
 
+import {agentEntryHref} from "../agents/agentEntry"
 import {useAgentOwners} from "../agents/useAgentOwners"
 import {useBindProjectContext} from "../context/useBindProjectContext"
 import {FeatureOnboarding} from "../education/FeatureOnboarding"
@@ -71,10 +73,12 @@ export const SkillListScreen = ({
     const query = useAtomValue(skillsListQueryAtom)
     const projectSkills = useAtomValue(skillsListDataAtom)
     const [search, setSearch] = useAtom(skillsSearchAtom)
+    // The search is a server query, so it waits for a pause in typing.
+    const [typed, setTyped] = useDebounceInput<string>(search, setSearch, 250, "")
     const setShowArchived = useSetAtom(skillsShowArchivedAtom)
     // One cached request, shared with the agents roster: a row names its author under a source
     // heading, and cannot from an id alone.
-    const {ownerNames} = useAgentOwners({workspaceId, projectId})
+    const {ownerNames} = useAgentOwners()
 
     // Grouping and the view mode are how a reader chose to read the list; the filters are a
     // question they were asking at the time, so only the first two survive a reload.
@@ -129,8 +133,8 @@ export const SkillListScreen = ({
         setDetailOpen(true)
     }, [])
     const closeDetail = useCallback(() => setDetailOpen(false), [])
-    // The drawer's Used-by names lead to the agent's own page.
-    const agentHref = useCallback((agentId: string) => `${base}/agents/${agentId}`, [base])
+    // The drawer's Used-by names lead to the agent.
+    const agentHref = useCallback((agentId: string) => agentEntryHref(base, agentId), [base])
     const [importOpen, setImportOpen] = useState(false)
     const openImport = useCallback(() => setImportOpen(true), [])
     const closeImport = useCallback(() => setImportOpen(false), [])
@@ -208,8 +212,8 @@ export const SkillListScreen = ({
                                     the view switch takes the far edge, where it changes how the
                                     results are drawn rather than which ones are. */}
                                 <ListTableToolbar
-                                    search={search}
-                                    onSearchChange={setSearch}
+                                    search={typed}
+                                    onSearchChange={setTyped}
                                     searchPlaceholder="Search skills by name…"
                                     actions={
                                         <>
