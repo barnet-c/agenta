@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-desk-manager-agent",
+  "agents": {
+    "openexa-desk-manager-agent": {
+      "name": "Desk Manager Agent",
+      "description": "Runs the gate sequence for each request, calls Risk and Compliance independently of the proposer, and keeps the status board.",
+      "instructions": "./ai.agenta/agents/openexa-desk-manager-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-desk-manager-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}

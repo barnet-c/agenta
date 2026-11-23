@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "openexa-pnl-and-attribution-agent",
+  "version": "1.0.0",
+  "description": "Daily PnL and attribution (edge, costs, slippage) and how paper results compare with the desk model.",
+  "author": {
+    "name": "OpenEXA"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "support",
+    "openexa",
+    "agent-template"
+  ],
+  "extensions": {
+    "ai.agenta": {
+      "manifest": "./ai.agenta/agents.json"
+    }
+  }
+}

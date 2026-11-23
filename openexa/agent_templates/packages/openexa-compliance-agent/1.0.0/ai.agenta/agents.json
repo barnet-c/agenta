@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-compliance-agent",
+  "agents": {
+    "openexa-compliance-agent": {
+      "name": "Compliance Agent",
+      "description": "Pre-trade mandate, restricted-list and regulatory checks on each proposal.",
+      "instructions": "./ai.agenta/agents/openexa-compliance-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-compliance-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm"
+      ]
+    }
+  }
+}

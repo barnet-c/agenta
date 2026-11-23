@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-ledger-auditor",
+  "agents": {
+    "openexa-ledger-auditor": {
+      "name": "Ledger Auditor",
+      "description": "Independently verifies the hash-chained decision records and that every action has its approval trail.",
+      "instructions": "./ai.agenta/agents/openexa-ledger-auditor/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-ledger-auditor/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm"
+      ]
+    }
+  }
+}

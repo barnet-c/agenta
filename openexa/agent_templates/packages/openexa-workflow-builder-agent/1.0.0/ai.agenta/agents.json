@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-workflow-builder-agent",
+  "agents": {
+    "openexa-workflow-builder-agent": {
+      "name": "Workflow Builder Agent",
+      "description": "Plan-only help turning a reviewed process-flow document into an n8n workflow design. Humans build and deploy.",
+      "instructions": "./ai.agenta/agents/openexa-workflow-builder-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-workflow-builder-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}

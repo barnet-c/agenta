@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "openexa-research-and-content-agent",
+  "version": "1.0.0",
+  "description": "Drafts research notes, blog and social posts from sourced facts, with a fact table.",
+  "author": {
+    "name": "OpenEXA"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "business",
+    "openexa",
+    "agent-template"
+  ],
+  "extensions": {
+    "ai.agenta": {
+      "manifest": "./ai.agenta/agents.json"
+    }
+  }
+}

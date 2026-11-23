@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-research-and-content-agent",
+  "agents": {
+    "openexa-research-and-content-agent": {
+      "name": "Research and Content Agent",
+      "description": "Drafts research notes, blog and social posts from sourced facts, with a fact table.",
+      "instructions": "./ai.agenta/agents/openexa-research-and-content-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-research-and-content-agent/SETUP.md",
+      "skills": [
+        "openexa-comms-and-disclosure"
+      ]
+    }
+  }
+}

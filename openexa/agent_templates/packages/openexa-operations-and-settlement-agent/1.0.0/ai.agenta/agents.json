@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-operations-and-settlement-agent",
+  "agents": {
+    "openexa-operations-and-settlement-agent": {
+      "name": "Operations and Settlement Agent",
+      "description": "Reconciles fills against approved plans and reports breaks. Never moves cash.",
+      "instructions": "./ai.agenta/agents/openexa-operations-and-settlement-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-operations-and-settlement-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}

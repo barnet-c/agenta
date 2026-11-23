@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "openexa-desk-manager-agent",
+  "version": "1.0.0",
+  "description": "Runs the gate sequence for each request, calls Risk and Compliance independently of the proposer, and keeps the status board.",
+  "author": {
+    "name": "OpenEXA"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "fund-desk",
+    "openexa",
+    "agent-template"
+  ],
+  "extensions": {
+    "ai.agenta": {
+      "manifest": "./ai.agenta/agents.json"
+    }
+  }
+}

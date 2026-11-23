@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-model-ops-agent",
+  "agents": {
+    "openexa-model-ops-agent": {
+      "name": "Model Ops Agent",
+      "description": "Designs the evaluators that test each agent's behaviour and reports regressions after a prompt or model change.",
+      "instructions": "./ai.agenta/agents/openexa-model-ops-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-model-ops-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm"
+      ]
+    }
+  }
+}

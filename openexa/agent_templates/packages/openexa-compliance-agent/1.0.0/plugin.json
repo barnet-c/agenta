@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "openexa-compliance-agent",
+  "version": "1.0.0",
+  "description": "Pre-trade mandate, restricted-list and regulatory checks on each proposal.",
+  "author": {
+    "name": "OpenEXA"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "fund-desk",
+    "openexa",
+    "agent-template"
+  ],
+  "extensions": {
+    "ai.agenta": {
+      "manifest": "./ai.agenta/agents.json"
+    }
+  }
+}

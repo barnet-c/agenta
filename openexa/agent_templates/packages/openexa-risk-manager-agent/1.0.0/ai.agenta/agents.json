@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-risk-manager-agent",
+  "agents": {
+    "openexa-risk-manager-agent": {
+      "name": "Risk Manager Agent",
+      "description": "Independent risk record per proposal: metrics, limits, headroom and binding limit.",
+      "instructions": "./ai.agenta/agents/openexa-risk-manager-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-risk-manager-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-ibit-create-redeem"
+      ]
+    }
+  }
+}

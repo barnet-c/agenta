@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-investor-relations-agent",
+  "agents": {
+    "openexa-investor-relations-agent": {
+      "name": "Investor Relations Agent",
+      "description": "Drafts investor updates and diligence answers from approved sources only.",
+      "instructions": "./ai.agenta/agents/openexa-investor-relations-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-investor-relations-agent/SETUP.md",
+      "skills": [
+        "openexa-comms-and-disclosure"
+      ]
+    }
+  }
+}

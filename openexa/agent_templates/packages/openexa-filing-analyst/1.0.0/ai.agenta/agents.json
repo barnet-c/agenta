@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-filing-analyst",
+  "agents": {
+    "openexa-filing-analyst": {
+      "name": "Filing Analyst",
+      "description": "Explains what SEC filings and catalysts mean for the ETF desks, from Filing Watch data only.",
+      "instructions": "./ai.agenta/agents/openexa-filing-analyst/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-filing-analyst/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}

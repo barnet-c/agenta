@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "openexa-model-ops-agent",
+  "version": "1.0.0",
+  "description": "Designs the evaluators that test each agent's behaviour and reports regressions after a prompt or model change.",
+  "author": {
+    "name": "OpenEXA"
+  },
+  "license": "Proprietary",
+  "keywords": [
+    "support",
+    "openexa",
+    "agent-template"
+  ],
+  "extensions": {
+    "ai.agenta": {
+      "manifest": "./ai.agenta/agents.json"
+    }
+  }
+}

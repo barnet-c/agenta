@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "openexa",
+  "name": "OpenEXA",
+  "bio": "The OpenEXA agent team: the fund desk pipeline, business and communications, and support agents.",
+  "links": [
+    {
+      "kind": "website",
+      "url": "https://app.openexa.com",
+      "label": "app.openexa.com"
+    }
+  ]
+}

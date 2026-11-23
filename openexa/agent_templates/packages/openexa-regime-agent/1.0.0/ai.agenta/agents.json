@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-regime-agent",
+  "agents": {
+    "openexa-regime-agent": {
+      "name": "Regime Agent",
+      "description": "Names the current market regime, with evidence and a change condition. Runs before the Strategy Agent.",
+      "instructions": "./ai.agenta/agents/openexa-regime-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-regime-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-ibit-create-redeem"
+      ]
+    }
+  }
+}

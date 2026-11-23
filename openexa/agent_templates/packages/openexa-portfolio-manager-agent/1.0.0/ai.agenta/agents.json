@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-portfolio-manager-agent",
+  "agents": {
+    "openexa-portfolio-manager-agent": {
+      "name": "Portfolio Manager Agent",
+      "description": "Turns ranked predictions into sized, routed proposals inside the risk envelope. Never places orders.",
+      "instructions": "./ai.agenta/agents/openexa-portfolio-manager-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-portfolio-manager-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-ibit-create-redeem",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}

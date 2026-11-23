@@ -1,0 +1,644 @@
+{
+  "schema_version": 1,
+  "templates": {
+    "openexa-data-health-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-data-health-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Validates every feed's freshness and sanity before any analyst runs. A red status stops the flow.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-0"
+        ],
+        "display": {
+          "initials": "DH",
+          "color": "#1F3A8A",
+          "instructions_summary": "Validates every feed's freshness and sanity before any analyst runs. A red status stops the flow.",
+          "trigger": "Fund desk · Data",
+          "trigger_description": "Runs when Desk Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Data Health Agent. Validates every feed's freshness and sanity before any analyst runs. A red status stops the flow.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-arkb-analyst": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-arkb-analyst/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Watches ARKB's premium or discount to NAV and BTC against its own desk cost model.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-1"
+        ],
+        "display": {
+          "initials": "AA",
+          "color": "#1F3A8A",
+          "instructions_summary": "Watches ARKB's premium or discount to NAV and BTC against its own desk cost model.",
+          "trigger": "Fund desk · Signal",
+          "trigger_description": "Runs when Portfolio Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA ARKB Analyst. Watches ARKB's premium or discount to NAV and BTC against its own desk cost model.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-fbtc-analyst": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-fbtc-analyst/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Watches FBTC's premium or discount to NAV and BTC against its own desk cost model.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-1"
+        ],
+        "display": {
+          "initials": "FA",
+          "color": "#1F3A8A",
+          "instructions_summary": "Watches FBTC's premium or discount to NAV and BTC against its own desk cost model.",
+          "trigger": "Fund desk · Signal",
+          "trigger_description": "Runs when Portfolio Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA FBTC Analyst. Watches FBTC's premium or discount to NAV and BTC against its own desk cost model.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-filing-analyst": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-filing-analyst/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Explains what SEC filings and catalysts mean for the ETF desks, from Filing Watch data only.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-1"
+        ],
+        "display": {
+          "initials": "FA",
+          "color": "#1F3A8A",
+          "instructions_summary": "Explains what SEC filings and catalysts mean for the ETF desks, from Filing Watch data only.",
+          "trigger": "Fund desk · Signal",
+          "trigger_description": "Runs when Portfolio Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Filing Analyst. Explains what SEC filings and catalysts mean for the ETF desks, from Filing Watch data only.",
+          "model": "sonnet"
+        },
+        "media": []
+      }
+    },
+    "openexa-gold-iau-analyst": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-gold-iau-analyst/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Watches IAU creation and redemption and the gold relative-value desk, with its own cost model.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-1"
+        ],
+        "display": {
+          "initials": "GI",
+          "color": "#1F3A8A",
+          "instructions_summary": "Watches IAU creation and redemption and the gold relative-value desk, with its own cost model.",
+          "trigger": "Fund desk · Signal",
+          "trigger_description": "Runs when Portfolio Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Gold/IAU Analyst. Watches IAU creation and redemption and the gold relative-value desk, with its own cost model.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-ibit-create-redeem-analyst": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-ibit-create-redeem-analyst/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Watches IBIT's premium or discount to spot BTC against the desk cost model and reports signals.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-1"
+        ],
+        "display": {
+          "initials": "IC",
+          "color": "#1F3A8A",
+          "instructions_summary": "Watches IBIT's premium or discount to spot BTC against the desk cost model and reports signals.",
+          "trigger": "Fund desk · Signal",
+          "trigger_description": "Runs when Portfolio Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA IBIT Create/Redeem Analyst. Watches IBIT's premium or discount to spot BTC against the desk cost model and reports signals.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-regime-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-regime-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Names the current market regime, with evidence and a change condition. Runs before the Strategy Agent.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-2"
+        ],
+        "display": {
+          "initials": "RA",
+          "color": "#1F3A8A",
+          "instructions_summary": "Names the current market regime, with evidence and a change condition. Runs before the Strategy Agent.",
+          "trigger": "Fund desk · Predict",
+          "trigger_description": "Runs when Portfolio Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Regime Agent. Names the current market regime, with evidence and a change condition. Runs before the Strategy Agent.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-strategy-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-strategy-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Turns observations into ranked, falsifiable predictions with an invalidation condition.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-2"
+        ],
+        "display": {
+          "initials": "SA",
+          "color": "#1F3A8A",
+          "instructions_summary": "Turns observations into ranked, falsifiable predictions with an invalidation condition.",
+          "trigger": "Fund desk · Predict",
+          "trigger_description": "Runs when Portfolio Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Strategy Agent. Turns observations into ranked, falsifiable predictions with an invalidation condition.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-portfolio-manager-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-portfolio-manager-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Turns ranked predictions into sized, routed proposals inside the risk envelope. Never places orders.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-3"
+        ],
+        "display": {
+          "initials": "PM",
+          "color": "#1F3A8A",
+          "instructions_summary": "Turns ranked predictions into sized, routed proposals inside the risk envelope. Never places orders.",
+          "trigger": "Fund desk · Decide",
+          "trigger_description": "Runs when Desk Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Portfolio Manager Agent. Turns ranked predictions into sized, routed proposals inside the risk envelope. Never places orders.",
+          "model": "opus[1m]"
+        },
+        "media": []
+      }
+    },
+    "openexa-compliance-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-compliance-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Pre-trade mandate, restricted-list and regulatory checks on each proposal.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-4"
+        ],
+        "display": {
+          "initials": "CA",
+          "color": "#1F3A8A",
+          "instructions_summary": "Pre-trade mandate, restricted-list and regulatory checks on each proposal.",
+          "trigger": "Fund desk · Approve",
+          "trigger_description": "Runs when Desk Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Compliance Agent. Pre-trade mandate, restricted-list and regulatory checks on each proposal.",
+          "model": "sonnet"
+        },
+        "media": []
+      }
+    },
+    "openexa-risk-manager-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-risk-manager-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Independent risk record per proposal: metrics, limits, headroom and binding limit.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-4"
+        ],
+        "display": {
+          "initials": "RM",
+          "color": "#1F3A8A",
+          "instructions_summary": "Independent risk record per proposal: metrics, limits, headroom and binding limit.",
+          "trigger": "Fund desk · Approve",
+          "trigger_description": "Runs when Desk Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Risk Manager Agent. Independent risk record per proposal: metrics, limits, headroom and binding limit.",
+          "model": "sonnet"
+        },
+        "media": []
+      }
+    },
+    "openexa-ibit-arbitrage-trader": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-ibit-arbitrage-trader/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Turns an approved IBIT create or redeem proposal into an execution plan. Plan only.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-5"
+        ],
+        "display": {
+          "initials": "IA",
+          "color": "#1F3A8A",
+          "instructions_summary": "Turns an approved IBIT create or redeem proposal into an execution plan. Plan only.",
+          "trigger": "Fund desk · Execute prep",
+          "trigger_description": "Runs when Desk Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA IBIT Arbitrage Trader. Turns an approved IBIT create or redeem proposal into an execution plan. Plan only.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-ledger-auditor": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-ledger-auditor/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Independently verifies the hash-chained decision records and that every action has its approval trail.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-6"
+        ],
+        "display": {
+          "initials": "LA",
+          "color": "#1F3A8A",
+          "instructions_summary": "Independently verifies the hash-chained decision records and that every action has its approval trail.",
+          "trigger": "Fund desk · Settle",
+          "trigger_description": "Runs when Desk Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Ledger Auditor. Independently verifies the hash-chained decision records and that every action has its approval trail.",
+          "model": "sonnet"
+        },
+        "media": []
+      }
+    },
+    "openexa-operations-and-settlement-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-operations-and-settlement-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Reconciles fills against approved plans and reports breaks. Never moves cash.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk",
+          "stage-6"
+        ],
+        "display": {
+          "initials": "OS",
+          "color": "#1F3A8A",
+          "instructions_summary": "Reconciles fills against approved plans and reports breaks. Never moves cash.",
+          "trigger": "Fund desk · Settle",
+          "trigger_description": "Runs when Desk Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Operations and Settlement Agent. Reconciles fills against approved plans and reports breaks. Never moves cash.",
+          "model": "sonnet"
+        },
+        "media": []
+      }
+    },
+    "openexa-desk-manager-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-desk-manager-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Runs the gate sequence for each request, calls Risk and Compliance independently of the proposer, and keeps the status board.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk"
+        ],
+        "display": {
+          "initials": "DM",
+          "color": "#1F3A8A",
+          "instructions_summary": "Runs the gate sequence for each request, calls Risk and Compliance independently of the proposer, and keeps the status board.",
+          "trigger": "Fund desk · Orchestration",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Desk Manager Agent. Runs the gate sequence for each request, calls Risk and Compliance independently of the proposer, and keeps the status board.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-project-manager-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-project-manager-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Runs the operating cadence and turns exceptions into plain-language reports for humans.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "fund-desk"
+        ],
+        "display": {
+          "initials": "PM",
+          "color": "#1F3A8A",
+          "instructions_summary": "Runs the operating cadence and turns exceptions into plain-language reports for humans.",
+          "trigger": "Fund desk · Orchestration",
+          "trigger_description": "Runs when Desk Manager Agent hands it work, or when you message it.",
+          "seed_message": "Set up the OpenEXA Project Manager Agent. Runs the operating cadence and turns exceptions into plain-language reports for humans.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-comms-editor-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-comms-editor-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Fact-checks and disclosure-checks every external draft before a named human sees it.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "business"
+        ],
+        "display": {
+          "initials": "CE",
+          "color": "#7C2D12",
+          "instructions_summary": "Fact-checks and disclosure-checks every external draft before a named human sees it.",
+          "trigger": "Business and communications · Comms review",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Comms Editor Agent. Fact-checks and disclosure-checks every external draft before a named human sees it.",
+          "model": "opus[1m]"
+        },
+        "media": []
+      }
+    },
+    "openexa-investor-relations-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-investor-relations-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Drafts investor updates and diligence answers from approved sources only.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "business"
+        ],
+        "display": {
+          "initials": "IR",
+          "color": "#7C2D12",
+          "instructions_summary": "Drafts investor updates and diligence answers from approved sources only.",
+          "trigger": "Business and communications · Comms",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Investor Relations Agent. Drafts investor updates and diligence answers from approved sources only.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-outreach-drafter": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-outreach-drafter/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Drafts outreach to prospects, partners and investors in OpenEXA voice.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "business"
+        ],
+        "display": {
+          "initials": "OD",
+          "color": "#7C2D12",
+          "instructions_summary": "Drafts outreach to prospects, partners and investors in OpenEXA voice.",
+          "trigger": "Business and communications · Comms",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Outreach Drafter. Drafts outreach to prospects, partners and investors in OpenEXA voice.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-research-and-content-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-research-and-content-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Drafts research notes, blog and social posts from sourced facts, with a fact table.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "business"
+        ],
+        "display": {
+          "initials": "RC",
+          "color": "#7C2D12",
+          "instructions_summary": "Drafts research notes, blog and social posts from sourced facts, with a fact table.",
+          "trigger": "Business and communications · Comms",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Research and Content Agent. Drafts research notes, blog and social posts from sourced facts, with a fact table.",
+          "model": "sonnet"
+        },
+        "media": []
+      }
+    },
+    "openexa-website-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-website-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Proposes small, checked website edits as diffs or pull requests. Never pushes to main.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "business"
+        ],
+        "display": {
+          "initials": "WA",
+          "color": "#7C2D12",
+          "instructions_summary": "Proposes small, checked website edits as diffs or pull requests. Never pushes to main.",
+          "trigger": "Business and communications · Comms",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Website Agent. Proposes small, checked website edits as diffs or pull requests. Never pushes to main.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-analyst-designer": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-analyst-designer/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Designs and reviews analyst agents and their observation records. Not a signal source itself.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "support",
+          "stage-1"
+        ],
+        "display": {
+          "initials": "AD",
+          "color": "#065F46",
+          "instructions_summary": "Designs and reviews analyst agents and their observation records. Not a signal source itself.",
+          "trigger": "Support and tooling · Signal (design)",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Analyst Designer. Designs and reviews analyst agents and their observation records. Not a signal source itself.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-model-ops-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-model-ops-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Designs the evaluators that test each agent's behaviour and reports regressions after a prompt or model change.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "support"
+        ],
+        "display": {
+          "initials": "MO",
+          "color": "#065F46",
+          "instructions_summary": "Designs the evaluators that test each agent's behaviour and reports regressions after a prompt or model change.",
+          "trigger": "Support and tooling · Support",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Model Ops Agent. Designs the evaluators that test each agent's behaviour and reports regressions after a prompt or model change.",
+          "model": "sonnet"
+        },
+        "media": []
+      }
+    },
+    "openexa-pnl-and-attribution-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-pnl-and-attribution-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Daily PnL and attribution (edge, costs, slippage) and how paper results compare with the desk model.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "support"
+        ],
+        "display": {
+          "initials": "PA",
+          "color": "#065F46",
+          "instructions_summary": "Daily PnL and attribution (edge, costs, slippage) and how paper results compare with the desk model.",
+          "trigger": "Support and tooling · Support",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA PnL and Attribution Agent. Daily PnL and attribution (edge, costs, slippage) and how paper results compare with the desk model.",
+          "model": "gpt-5.6-luna"
+        },
+        "media": []
+      }
+    },
+    "openexa-quant-research-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-quant-research-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Backtests and studies behind strategy ideas: edge after costs, stability and failure cases.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "support"
+        ],
+        "display": {
+          "initials": "QR",
+          "color": "#065F46",
+          "instructions_summary": "Backtests and studies behind strategy ideas: edge after costs, stability and failure cases.",
+          "trigger": "Support and tooling · Support",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Quant Research Agent. Backtests and studies behind strategy ideas: edge after costs, stability and failure cases.",
+          "model": "sonnet"
+        },
+        "media": []
+      }
+    },
+    "openexa-workflow-builder-agent": {
+      "latest": "1.0.0",
+      "versions": {
+        "1.0.0": "packages/openexa-workflow-builder-agent/1.0.0"
+      },
+      "metadata": {
+        "author_id": "openexa",
+        "summary": "Plan-only help turning a reviewed process-flow document into an n8n workflow design. Humans build and deploy.",
+        "category": "OpenEXA Agent Team",
+        "tags": [
+          "support"
+        ],
+        "display": {
+          "initials": "WB",
+          "color": "#065F46",
+          "instructions_summary": "Plan-only help turning a reviewed process-flow document into an n8n workflow design. Humans build and deploy.",
+          "trigger": "Support and tooling · Support",
+          "trigger_description": "Runs when you message it.",
+          "seed_message": "Set up the OpenEXA Workflow Builder Agent. Plan-only help turning a reviewed process-flow document into an n8n workflow design. Humans build and deploy.",
+          "model": "sonnet"
+        },
+        "media": []
+      }
+    }
+  }
+}

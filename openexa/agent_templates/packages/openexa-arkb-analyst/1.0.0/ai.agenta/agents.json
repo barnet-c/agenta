@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-arkb-analyst",
+  "agents": {
+    "openexa-arkb-analyst": {
+      "name": "ARKB Analyst",
+      "description": "Watches ARKB's premium or discount to NAV and BTC against its own desk cost model.",
+      "instructions": "./ai.agenta/agents/openexa-arkb-analyst/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-arkb-analyst/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}

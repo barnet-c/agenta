@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-website-agent",
+  "agents": {
+    "openexa-website-agent": {
+      "name": "Website Agent",
+      "description": "Proposes small, checked website edits as diffs or pull requests. Never pushes to main.",
+      "instructions": "./ai.agenta/agents/openexa-website-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-website-agent/SETUP.md",
+      "skills": [
+        "openexa-comms-and-disclosure"
+      ]
+    }
+  }
+}

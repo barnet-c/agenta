@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-quant-research-agent",
+  "agents": {
+    "openexa-quant-research-agent": {
+      "name": "Quant Research Agent",
+      "description": "Backtests and studies behind strategy ideas: edge after costs, stability and failure cases.",
+      "instructions": "./ai.agenta/agents/openexa-quant-research-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-quant-research-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-ibit-create-redeem"
+      ]
+    }
+  }
+}

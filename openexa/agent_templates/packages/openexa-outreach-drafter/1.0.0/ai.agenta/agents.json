@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-outreach-drafter",
+  "agents": {
+    "openexa-outreach-drafter": {
+      "name": "Outreach Drafter",
+      "description": "Drafts outreach to prospects, partners and investors in OpenEXA voice.",
+      "instructions": "./ai.agenta/agents/openexa-outreach-drafter/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-outreach-drafter/SETUP.md",
+      "skills": [
+        "openexa-comms-and-disclosure"
+      ]
+    }
+  }
+}

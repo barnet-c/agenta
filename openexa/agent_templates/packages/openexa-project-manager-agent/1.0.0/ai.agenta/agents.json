@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-project-manager-agent",
+  "agents": {
+    "openexa-project-manager-agent": {
+      "name": "Project Manager Agent",
+      "description": "Runs the operating cadence and turns exceptions into plain-language reports for humans.",
+      "instructions": "./ai.agenta/agents/openexa-project-manager-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-project-manager-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}

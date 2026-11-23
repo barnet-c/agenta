@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-fbtc-analyst",
+  "agents": {
+    "openexa-fbtc-analyst": {
+      "name": "FBTC Analyst",
+      "description": "Watches FBTC's premium or discount to NAV and BTC against its own desk cost model.",
+      "instructions": "./ai.agenta/agents/openexa-fbtc-analyst/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-fbtc-analyst/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}

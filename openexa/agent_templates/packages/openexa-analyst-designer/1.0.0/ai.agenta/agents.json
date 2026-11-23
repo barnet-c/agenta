@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-analyst-designer",
+  "agents": {
+    "openexa-analyst-designer": {
+      "name": "Analyst Designer",
+      "description": "Designs and reviews analyst agents and their observation records. Not a signal source itself.",
+      "instructions": "./ai.agenta/agents/openexa-analyst-designer/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-analyst-designer/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm"
+      ]
+    }
+  }
+}

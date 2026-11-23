@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-strategy-agent",
+  "agents": {
+    "openexa-strategy-agent": {
+      "name": "Strategy Agent",
+      "description": "Turns observations into ranked, falsifiable predictions with an invalidation condition.",
+      "instructions": "./ai.agenta/agents/openexa-strategy-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-strategy-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-ibit-create-redeem"
+      ]
+    }
+  }
+}

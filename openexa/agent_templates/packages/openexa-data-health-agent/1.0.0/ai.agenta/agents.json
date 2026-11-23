@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-data-health-agent",
+  "agents": {
+    "openexa-data-health-agent": {
+      "name": "Data Health Agent",
+      "description": "Validates every feed's freshness and sanity before any analyst runs. A red status stops the flow.",
+      "instructions": "./ai.agenta/agents/openexa-data-health-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-data-health-agent/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}

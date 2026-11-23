@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-comms-editor-agent",
+  "agents": {
+    "openexa-comms-editor-agent": {
+      "name": "Comms Editor Agent",
+      "description": "Fact-checks and disclosure-checks every external draft before a named human sees it.",
+      "instructions": "./ai.agenta/agents/openexa-comms-editor-agent/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-comms-editor-agent/SETUP.md",
+      "skills": [
+        "openexa-comms-and-disclosure"
+      ]
+    }
+  }
+}

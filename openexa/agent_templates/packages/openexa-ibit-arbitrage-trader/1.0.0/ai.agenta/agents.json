@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "entry": "openexa-ibit-arbitrage-trader",
+  "agents": {
+    "openexa-ibit-arbitrage-trader": {
+      "name": "IBIT Arbitrage Trader",
+      "description": "Turns an approved IBIT create or redeem proposal into an execution plan. Plan only.",
+      "instructions": "./ai.agenta/agents/openexa-ibit-arbitrage-trader/AGENTS.md",
+      "setup": "./ai.agenta/agents/openexa-ibit-arbitrage-trader/SETUP.md",
+      "skills": [
+        "openexa-governed-swarm",
+        "openexa-ibit-create-redeem",
+        "openexa-systems-map"
+      ]
+    }
+  }
+}
